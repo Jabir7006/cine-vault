@@ -6,25 +6,25 @@ import { cn } from "@/lib/utils";
 
 export const DesktopNavbar = () => {
   return (
-    <header className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-max w-[calc(100%-2rem)] hidden md:block">
-      <nav className="flex items-center gap-1 sm:gap-1.5 p-1.5 rounded-full bg-neutral-950/80 backdrop-blur-xl border border-neutral-800/80 shadow-2xl shadow-black/50 text-neutral-300">
-        {/* Brand Logo */}
+    <header className="fixed top-5 left-1/2 -translate-x-1/2 z-50 max-w-max w-[calc(100%-2rem)] hidden md:block">
+      <nav className="flex items-center gap-1.5 p-1.5 rounded-full bg-neutral-950/60 backdrop-blur-2xl border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.6)] text-neutral-300">
+        {/* Brand Logo Pill */}
         <Button
           asChild
           variant="ghost"
           size="sm"
-          className="rounded-full px-3 text-white hover:bg-neutral-800/80 hover:text-white"
+          className="rounded-full px-4 py-1.5 h-auto bg-white/10 hover:bg-white/15 text-white font-semibold border border-white/15 backdrop-blur-md transition-all shadow-sm"
         >
           <Link to="/" aria-label="CineVault Home">
-            <Clapperboard className="w-5 h-5 text-white" />
-            <span className="font-semibold text-neutral-50 text-base ml-2">
+            <Clapperboard className="w-4 h-4 text-white" />
+            <span className="font-semibold text-white text-sm tracking-tight ml-2">
               CineVault
             </span>
           </Link>
         </Button>
 
         {/* Vertical Divider */}
-        <div className="h-4 w-px bg-neutral-800 mx-0.5" />
+        <div className="h-4 w-px bg-white/10 mx-0.5" />
 
         {/* Navigation Items */}
         <div className="flex items-center gap-1">
@@ -43,14 +43,14 @@ export const DesktopNavbar = () => {
                   activeOptions={{ exact: item.to === "/" }}
                   activeProps={{
                     className:
-                      "bg-neutral-800 text-white font-semibold shadow-sm border border-neutral-700/60 hover:bg-neutral-800 hover:text-white",
+                      "bg-white/10 text-white font-semibold shadow-sm border border-white/15 backdrop-blur-md hover:bg-white/15 hover:text-white",
                   }}
                   inactiveProps={{
                     className:
-                      "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50 border border-transparent",
+                      "text-neutral-400 hover:text-neutral-100 hover:bg-white/5 border border-transparent",
                   }}
                   className={cn(
-                    "flex items-center gap-2 px-3.5 py-1.5 rounded-full text-sm transition-all duration-200 select-none whitespace-nowrap"
+                    "flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium transition-all duration-200 select-none whitespace-nowrap"
                   )}
                 >
                   <Icon className="w-4 h-4 shrink-0" />
