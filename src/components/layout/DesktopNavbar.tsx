@@ -13,16 +13,16 @@ export const DesktopNavbar = () => {
           asChild
           variant="ghost"
           size="sm"
-          className="rounded-full px-4 py-1.5 h-auto bg-white/10 hover:bg-white/15 text-white font-semibold border border-white/15 backdrop-blur-md transition-all shadow-sm"
+          className="rounded-full px-4 py-2 h-auto bg-white/10 hover:bg-white/15 backdrop-blur-xl border border-white/15 shadow-sm transition-all"
         >
           <Link to="/" aria-label="CineVault Home">
-            <Clapperboard className="w-4 h-4 text-white" />
-            <span className="font-semibold text-white text-sm tracking-tight ml-2">
-              CineVault
+            <Clapperboard className="w-4 h-4 shrink-0 text-neutral-300" />
+            <span className="font-serif italic tracking-tight text-base leading-none ml-2">
+              <span className="font-bold text-white">Cine</span>
+              <span className="font-normal text-neutral-300">Vault</span>
             </span>
           </Link>
         </Button>
-
         {/* Vertical Divider */}
         <div className="h-4 w-px bg-white/10 mx-0.5" />
 
@@ -50,7 +50,7 @@ export const DesktopNavbar = () => {
                       "text-neutral-400 hover:text-neutral-100 hover:bg-white/5 border border-transparent",
                   }}
                   className={cn(
-                    "flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium transition-all duration-200 select-none whitespace-nowrap"
+                    "flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-medium transition-all duration-200 select-none whitespace-nowrap",
                   )}
                 >
                   <Icon className="w-4 h-4 shrink-0" />
