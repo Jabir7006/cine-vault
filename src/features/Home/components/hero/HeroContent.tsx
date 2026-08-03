@@ -18,7 +18,7 @@ const HeroContent = ({ movie }: HeroContentProps) => {
     year,
     duration,
     ageRating,
-    genres,
+    genres = [],
   } = movie;
 
   return (
@@ -40,22 +40,28 @@ const HeroContent = ({ movie }: HeroContentProps) => {
           <Star className="size-3.5 fill-current" />
           {rating.toFixed(1)}
         </span>
-        <span>{year}</span>
-        <span className="inline-flex items-center gap-1">
-          <Clock className="size-3.5" />
-          {duration}
-        </span>
-        <span className="rounded border border-white/25 px-1.5 py-0.5 text-[10px] sm:text-xs">
-          {ageRating}
-        </span>
+        {year && <span>{year}</span>}
+        {duration && (
+          <span className="inline-flex items-center gap-1">
+            <Clock className="size-3.5" />
+            {duration}
+          </span>
+        )}
+        {ageRating && (
+          <span className="rounded border border-white/25 px-1.5 py-0.5 text-[10px] sm:text-xs">
+            {ageRating}
+          </span>
+        )}
       </motion.div>
 
-      <motion.p
-        variants={contentItemVariants}
-        className="text-xs font-medium uppercase tracking-[0.28em] text-neutral-300/90 sm:text-sm"
-      >
-        {tagline}
-      </motion.p>
+      {tagline && (
+        <motion.p
+          variants={contentItemVariants}
+          className="text-xs font-medium uppercase tracking-[0.28em] text-neutral-300/90 sm:text-sm"
+        >
+          {tagline}
+        </motion.p>
+      )}
 
       <motion.h1
         variants={contentItemVariants}
@@ -64,19 +70,21 @@ const HeroContent = ({ movie }: HeroContentProps) => {
         {title}
       </motion.h1>
 
-      <motion.div
-        variants={contentItemVariants}
-        className="flex flex-wrap gap-2"
-      >
-        {genres.map((genre) => (
-          <span
-            key={genre}
-            className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs font-medium text-neutral-200 backdrop-blur-md"
-          >
-            {genre}
-          </span>
-        ))}
-      </motion.div>
+      {genres.length > 0 && (
+        <motion.div
+          variants={contentItemVariants}
+          className="flex flex-wrap gap-2"
+        >
+          {genres.map((genre) => (
+            <span
+              key={genre}
+              className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs font-medium text-neutral-200 backdrop-blur-md"
+            >
+              {genre}
+            </span>
+          ))}
+        </motion.div>
+      )}
 
       <motion.p
         variants={contentItemVariants}

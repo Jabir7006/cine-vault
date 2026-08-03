@@ -1,38 +1,53 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence } from "framer-motion";
+import { useSuspenseQuery } from "@tanstack/react-query";
 
-import type { HeroMovie } from "@/features/Home/types";
-import { HERO_MOVIES } from "@/features/Home/data";
 import HeroBackdrop from "./HeroBackdrop";
 import HeroContent from "./HeroContent";
 import HeroControls from "./HeroControls";
 import HeroIndicators from "./HeroIndicators";
 import { useHeroAutoplay } from "@/features/Home/hooks/useHeroAutoplay";
+import { weeklyTrendingOptions } from "../../hooks/useHomeQueries";
+import {
+  mapTMDBToHeroMovie,
+  type HeroMovie,
+  type TMDBMediaItem,
+} from "../../types";
 
 const SWIPE_THRESHOLD = 48;
 
-interface HeroCarouselProps {
-  movies?: HeroMovie[];
-}
+const HeroCarousel = () => {
+  const { data: rawTrending } = useSuspenseQuery(weeklyTrendingOptions);
 
-const HeroCarousel = ({ movies = HERO_MOVIES }: HeroCarouselProps) => {
+  const movies: HeroMovie[] = useMemo(() => {
+    if (!rawTrending || !Array.isArray(rawTrending)) return [];
+    return (rawTrending as TMDBMediaItem[]).map(mapTMDBToHeroMovie);
+  }, [rawTrending]);
+
   const [activeIndex, setActiveIndex] = useState(0);
   const [paused, setPaused] = useState(false);
   const touchStartX = useRef<number | null>(null);
 
   const count = movies.length;
-  const activeMovie = movies[activeIndex];
+  const activeMovie = movies[activeIndex] ?? movies[0];
 
   const goTo = useCallback(
-    (index: number) => setActiveIndex((index + count) % count),
+    (index: number) => {
+      if (count > 0) setActiveIndex((index + count) % count);
+    },
     [count],
   );
   const goNext = useCallback(
-    () => setActiveIndex((current) => (current + 1) % count),
+    () => {
+      if (count > 0) setActiveIndex((current) => (current + 1) % count);
+    },
     [count],
   );
   const goPrev = useCallback(
-    () => setActiveIndex((current) => (current - 1 + count) % count),
+    () => {
+      if (count > 0)
+        setActiveIndex((current) => (current - 1 + count) % count);
+    },
     [count],
   );
 
@@ -65,6 +80,10 @@ const HeroCarousel = ({ movies = HERO_MOVIES }: HeroCarouselProps) => {
 
     touchStartX.current = null;
   };
+
+  if (!activeMovie || count === 0) {
+    return null;
+  }
 
   return (
     <section
