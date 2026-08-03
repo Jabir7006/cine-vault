@@ -1,7 +1,12 @@
 import { Outlet, createRootRoute } from "@tanstack/react-router";
+import type { QueryClient } from "@tanstack/react-query";
 import Header from "../components/layout/Header";
 
-export const Route = createRootRoute({
+interface MyRouterContext {
+  queryClient: QueryClient;
+}
+
+export const Route = createRootRoute<MyRouterContext>({
   component: () => {
     return (
       <>
