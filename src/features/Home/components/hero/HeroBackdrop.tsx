@@ -5,9 +5,10 @@ import { backdropFadeVariants, backdropVariants } from "./animations";
 
 interface HeroBackdropProps {
   movie: HeroMovie;
+  isFirst?: boolean;
 }
 
-const HeroBackdrop = ({ movie }: HeroBackdropProps) => {
+const HeroBackdrop = ({ movie, isFirst }: HeroBackdropProps) => {
   const reduceMotion = useReducedMotion();
 
   return (
@@ -23,6 +24,8 @@ const HeroBackdrop = ({ movie }: HeroBackdropProps) => {
       <img
         src={movie.backdrop}
         alt=""
+        loading={isFirst ? "eager" : "lazy"}
+        fetchPriority={isFirst ? "high" : "auto"}
         className="h-full w-full object-cover object-center"
         draggable={false}
       />

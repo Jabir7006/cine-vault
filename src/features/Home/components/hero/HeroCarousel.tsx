@@ -92,7 +92,11 @@ const HeroCarousel = () => {
     >
       {/* Backdrop — absolutely fills the locked-height section */}
       <AnimatePresence initial={false}>
-        <HeroBackdrop key={activeMovie.id} movie={activeMovie} />
+        <HeroBackdrop
+          key={activeMovie.id}
+          movie={activeMovie}
+          isFirst={activeIndex === 0}
+        />
       </AnimatePresence>
 
       {/* Content — absolutely positioned so it never influences section height */}

@@ -82,9 +82,9 @@ export const mapTMDBToHeroMovie = (item: TMDBMediaItem): HeroMovie => {
   const year = releaseDate ? new Date(releaseDate).getFullYear() : undefined;
 
   const backdrop = item.backdrop_path
-    ? `https://image.tmdb.org/t/p/original${item.backdrop_path}`
+    ? `https://image.tmdb.org/t/p/w1280${item.backdrop_path}`
     : item.poster_path
-      ? `https://image.tmdb.org/t/p/original${item.poster_path}`
+      ? `https://image.tmdb.org/t/p/w780${item.poster_path}`
       : "";
 
   const poster = item.poster_path

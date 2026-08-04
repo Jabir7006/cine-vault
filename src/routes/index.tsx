@@ -1,12 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import HomeComponent from "@/features/Home/Home";
-import { streamingProvidersOptions } from "@/features/Home/hooks/useHomeQueries";
+import {
+  streamingProvidersOptions,
+  weeklyTrendingOptions,
+} from "@/features/Home/hooks/useHomeQueries";
 
 export const Route = createFileRoute("/")({
-  loader: ({ context }) => {
-    void context.queryClient
-      .prefetchQuery(streamingProvidersOptions)
-      .catch(() => undefined);
+  loader: async ({ context: { queryClient } }) => {
+    await queryClient.ensureQueryData(weeklyTrendingOptions);
+
+    void queryClient.prefetchQuery(streamingProvidersOptions);
   },
   component: HomeComponent,
 });
