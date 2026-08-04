@@ -37,19 +37,12 @@ const HeroCarousel = () => {
     },
     [count],
   );
-  const goNext = useCallback(
-    () => {
-      if (count > 0) setActiveIndex((current) => (current + 1) % count);
-    },
-    [count],
-  );
-  const goPrev = useCallback(
-    () => {
-      if (count > 0)
-        setActiveIndex((current) => (current - 1 + count) % count);
-    },
-    [count],
-  );
+  const goNext = useCallback(() => {
+    if (count > 0) setActiveIndex((current) => (current + 1) % count);
+  }, [count]);
+  const goPrev = useCallback(() => {
+    if (count > 0) setActiveIndex((current) => (current - 1 + count) % count);
+  }, [count]);
 
   const progress = useHeroAutoplay({
     index: activeIndex,
@@ -89,7 +82,7 @@ const HeroCarousel = () => {
     <section
       aria-label="Featured movies"
       aria-roledescription="carousel"
-      className="relative flex min-h-[82svh] w-full flex-col justify-end overflow-hidden bg-neutral-950 text-white sm:min-h-[88svh]"
+      className="relative h-svh w-full overflow-hidden bg-neutral-950 text-white"
       onMouseDownCapture={() => setPaused(true)}
       onMouseUpCapture={() => setPaused(false)}
       onFocusCapture={() => setPaused(true)}
@@ -97,23 +90,27 @@ const HeroCarousel = () => {
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
     >
-      <AnimatePresence>
+      {/* Backdrop — absolutely fills the locked-height section */}
+      <AnimatePresence initial={false}>
         <HeroBackdrop key={activeMovie.id} movie={activeMovie} />
       </AnimatePresence>
 
-      <div className="relative z-10 mx-auto flex w-full max-w-7xl flex-col gap-10 px-5 pb-32 pt-24 sm:px-8 sm:pb-20 lg:px-12">
-        <AnimatePresence mode="wait">
-          <HeroContent key={activeMovie.id} movie={activeMovie} />
-        </AnimatePresence>
+      {/* Content — absolutely positioned so it never influences section height */}
+      <div className="absolute inset-0 z-10 flex flex-col justify-end">
+        <div className="mx-auto flex w-full max-w-7xl flex-col gap-10 px-5 pb-24 pt-24 sm:px-8 sm:pb-20 lg:px-12">
+          <AnimatePresence mode="wait">
+            <HeroContent key={activeMovie.id} movie={activeMovie} />
+          </AnimatePresence>
 
-        <div className="flex items-end justify-between gap-4">
-          <HeroIndicators
-            movies={movies}
-            activeIndex={activeIndex}
-            progress={progress}
-            onSelect={goTo}
-          />
-          <HeroControls onPrev={goPrev} onNext={goNext} />
+          <div className="flex items-end justify-between gap-4">
+            <HeroIndicators
+              movies={movies}
+              activeIndex={activeIndex}
+              progress={progress}
+              onSelect={goTo}
+            />
+            <HeroControls onPrev={goPrev} onNext={goNext} />
+          </div>
         </div>
       </div>
     </section>

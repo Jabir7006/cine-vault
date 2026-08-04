@@ -26,9 +26,8 @@ const HeroBackdrop = ({ movie }: HeroBackdropProps) => {
         className="h-full w-full object-cover object-center"
         draggable={false}
       />
-      <div className="absolute inset-0 bg-linear-to-r from-neutral-950/95 via-neutral-950/55 to-neutral-950/20" />
-      <div className="absolute inset-0 bg-linear-to-t from-neutral-950 via-neutral-950/10 to-neutral-950/50" />
-      <div className="absolute inset-0 bg-neutral-950/20" />
+      {/* Subtle left gradient only — keeps text readable without dimming the image */}
+      <div className="absolute inset-0 bg-linear-to-r from-neutral-950/80 via-neutral-950/20 to-transparent" />
     </motion.div>
   );
 };
