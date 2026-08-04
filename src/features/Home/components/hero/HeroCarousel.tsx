@@ -1,11 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { AnimatePresence } from "framer-motion";
 import { useSuspenseQuery } from "@tanstack/react-query";
+import { CatchBoundary } from "@tanstack/react-router";
 
 import HeroBackdrop from "./HeroBackdrop";
 import HeroContent from "./HeroContent";
 import HeroControls from "./HeroControls";
 import HeroIndicators from "./HeroIndicators";
+import HeroSkeleton from "./HeroSkeleton";
+import SectionError from "@/components/common/SectionError";
 import { useHeroAutoplay } from "@/features/Home/hooks/useHeroAutoplay";
 import { weeklyTrendingOptions } from "../../hooks/useHomeQueries";
 import {
@@ -16,7 +26,7 @@ import {
 
 const SWIPE_THRESHOLD = 48;
 
-const HeroCarousel = () => {
+const HeroCarouselContent = () => {
   const { data: rawTrending } = useSuspenseQuery(weeklyTrendingOptions);
 
   const movies: HeroMovie[] = useMemo(() => {
@@ -79,10 +89,8 @@ const HeroCarousel = () => {
   }
 
   return (
-    <section
-      aria-label="Featured movies"
-      aria-roledescription="carousel"
-      className="relative h-svh w-full overflow-hidden bg-neutral-950 text-white"
+    <div
+      className="absolute inset-0"
       onMouseDownCapture={() => setPaused(true)}
       onMouseUpCapture={() => setPaused(false)}
       onFocusCapture={() => setPaused(true)}
@@ -90,7 +98,7 @@ const HeroCarousel = () => {
       onTouchStart={handleTouchStart}
       onTouchEnd={handleTouchEnd}
     >
-      {/* Backdrop — absolutely fills the locked-height section */}
+      {/* Backdrop */}
       <AnimatePresence initial={false}>
         <HeroBackdrop
           key={activeMovie.id}
@@ -99,7 +107,7 @@ const HeroCarousel = () => {
         />
       </AnimatePresence>
 
-      {/* Content — absolutely positioned so it never influences section height */}
+      {/* Content */}
       <div className="absolute inset-0 z-10 flex flex-col justify-end">
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-10 px-5 pb-24 pt-24 sm:px-8 sm:pb-20 lg:px-12">
           <AnimatePresence mode="wait">
@@ -117,8 +125,34 @@ const HeroCarousel = () => {
           </div>
         </div>
       </div>
-    </section>
+    </div>
   );
 };
+
+const HeroCarousel = () => (
+  <section
+    aria-label="Featured movies"
+    aria-roledescription="carousel"
+    className="relative h-svh w-full overflow-hidden bg-neutral-950 text-white"
+  >
+    <CatchBoundary
+      getResetKey={() => "weekly-trending"}
+      errorComponent={({ error, reset }) => (
+        <div className="absolute inset-0 z-10 flex items-center justify-center px-5">
+          <SectionError
+            error={error}
+            reset={reset}
+            queryKey={weeklyTrendingOptions.queryKey}
+            title="hero carousel"
+          />
+        </div>
+      )}
+    >
+      <Suspense fallback={<HeroSkeleton />}>
+        <HeroCarouselContent />
+      </Suspense>
+    </CatchBoundary>
+  </section>
+);
 
 export default HeroCarousel;

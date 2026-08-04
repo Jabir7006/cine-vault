@@ -1,11 +1,11 @@
 import { Skeleton } from "@/components/ui/skeleton";
 
 const ProvidersSkeleton = () => (
-  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+  <div className="flex gap-3 overflow-hidden sm:gap-4">
     {Array.from({ length: 12 }).map((_, index) => (
       <Skeleton
         key={index}
-        className="h-28 rounded-2xl border border-white/10 bg-white/5 sm:h-32"
+        className="h-28 w-1/2 shrink-0 rounded-2xl border border-white/10 bg-white/5 sm:h-32 sm:w-1/3 md:w-1/4 lg:w-1/5 xl:w-1/6"
       />
     ))}
   </div>
