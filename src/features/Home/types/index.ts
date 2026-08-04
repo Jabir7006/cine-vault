@@ -122,3 +122,10 @@ export const mapTMDBToHeroMovie = (item: TMDBMediaItem): HeroMovie => {
     voteCount: item.vote_count,
   };
 };
+
+export interface StreamingProvider {
+  id: number;
+  name: string;
+  logoUrl: string;
+  priority: number;
+}

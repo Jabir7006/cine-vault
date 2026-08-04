@@ -4,6 +4,8 @@ export const AUTOPLAY_INTERVAL = 6000;
 
 const EASE_CINEMATIC: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
+export { EASE_CINEMATIC };
+
 const CROSSFADE: Transition = { duration: 0.9, ease: EASE_CINEMATIC };
 
 export const backdropVariants: Variants = {
