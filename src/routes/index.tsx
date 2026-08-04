@@ -7,8 +7,8 @@ import {
 } from "@/features/Home/hooks/useHomeQueries";
 
 export const Route = createFileRoute("/")({
-  loader: async ({ context: { queryClient } }) => {
-    await queryClient.ensureQueryData(weeklyTrendingOptions);
+  loader: ({ context: { queryClient } }) => {
+    void queryClient.prefetchQuery(weeklyTrendingOptions);
 
     void queryClient.prefetchQuery(streamingProvidersOptions);
     void queryClient.prefetchQuery(dailyTrendingOptions("movie"));
