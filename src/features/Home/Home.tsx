@@ -6,12 +6,30 @@ import SectionError from "../../components/common/SectionError";
 import ProvidersSection from "./components/providers/ProvidersSection";
 import ProvidersSkeleton from "./components/providers/ProvidersSkeleton";
 import TrendingSection from "./components/trending/TrendingSection";
-import { streamingProvidersOptions } from "./hooks/useHomeQueries";
+import {
+  streamingProvidersOptions,
+  weeklyTrendingOptions,
+} from "./hooks/useHomeQueries";
+import HeroSkeleton from "./components/hero/HeroSkeleton";
 
 const HomeComponent = () => {
   return (
     <>
-      <HeroCarousel />
+      <CatchBoundary
+        getResetKey={() => "weekly-trending"}
+        errorComponent={({ error, reset }) => (
+          <SectionError
+            error={error}
+            reset={reset}
+            queryKey={weeklyTrendingOptions.queryKey}
+            title="hero carousel"
+          />
+        )}
+      >
+        <Suspense fallback={<HeroSkeleton />}>
+          <HeroCarousel />
+        </Suspense>
+      </CatchBoundary>
       <CatchBoundary
         getResetKey={() => "streaming-providers"}
         errorComponent={({ error, reset }) => (
@@ -27,6 +45,7 @@ const HomeComponent = () => {
           <ProvidersSection />
         </Suspense>
       </CatchBoundary>
+
       <TrendingSection />
     </>
   );
