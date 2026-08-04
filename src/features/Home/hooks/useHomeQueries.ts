@@ -1,5 +1,9 @@
 import { queryOptions } from "@tanstack/react-query";
-import { getStreamingProviderList, getWeeklyTrending } from "../api/homeApi";
+import {
+  getDailyTrending,
+  getStreamingProviderList,
+  getWeeklyTrending,
+} from "../api/homeApi";
 
 export const weeklyTrendingOptions = queryOptions({
   queryKey: ["weekly-trending"],
@@ -8,6 +12,14 @@ export const weeklyTrendingOptions = queryOptions({
   staleTime: 5 * 60 * 1000,
   gcTime: 10 * 60 * 1000,
 });
+
+export const dailyTrendingOptions = (mediaType?: string) =>
+  queryOptions({
+    queryKey: ["daily-trending", mediaType],
+    queryFn: () => getDailyTrending(mediaType).then((res) => res.data?.results),
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
 
 export const streamingProvidersOptions = queryOptions({
   queryKey: ["streaming-providers"],

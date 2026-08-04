@@ -19,9 +19,7 @@ const mapWatchProvider = (
     ? `https://image.tmdb.org/t/p/w185${provider.logo_path}`
     : "",
   priority:
-    provider.display_priorities?.US ??
-    provider.display_priority ??
-    index,
+    provider.display_priorities?.US ?? provider.display_priority ?? index,
 });
 
 export const getWeeklyTrending = () => {
@@ -30,7 +28,15 @@ export const getWeeklyTrending = () => {
   );
 };
 
-export const getStreamingProviderList = async (): Promise<StreamingProvider[]> => {
+export const getDailyTrending = (mediaType: string = "movie") => {
+  return api.get<TMDBResponse<TMDBMediaItem>>(
+    `/trending/${mediaType}/day?language=en-US`,
+  );
+};
+
+export const getStreamingProviderList = async (): Promise<
+  StreamingProvider[]
+> => {
   const { data } = await api.get<{ results: WatchProviderResult[] }>(
     "/watch/providers/movie?language=en-US&watch_region=US",
   );
