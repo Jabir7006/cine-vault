@@ -8,7 +8,7 @@ interface MovieCardSkeletonProps {
 const MovieCardSkeleton = ({ className }: MovieCardSkeletonProps) => (
   <div
     className={cn(
-      "relative aspect-2/3 overflow-hidden rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl",
+      "relative aspect-2/3 overflow-hidden rounded-2xl border border-white/10 bg-neutral-900",
       className,
     )}
   >

@@ -126,6 +126,7 @@
     }
   html {
     @apply font-sans;
+    overflow-anchor: none;
     }
   
   html.dark body {

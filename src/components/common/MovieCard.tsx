@@ -11,6 +11,7 @@ interface MovieCardProps {
   item: TMDBMediaItem;
   index?: number;
   className?: string;
+  eager?: boolean;
 }
 
 const getPosterUrl = (posterPath: string | null): string => {
@@ -19,8 +20,14 @@ const getPosterUrl = (posterPath: string | null): string => {
   return `https://image.tmdb.org/t/p/w500${posterPath}`;
 };
 
-const MovieCard = ({ item, index = 0, className }: MovieCardProps) => {
+const MovieCard = ({
+  item,
+  index = 0,
+  className,
+  eager = false,
+}: MovieCardProps) => {
   const [imageError, setImageError] = useState(false);
+  const [imageLoaded, setImageLoaded] = useState(false);
 
   const title =
     item.title ||
@@ -42,6 +49,7 @@ const MovieCard = ({ item, index = 0, className }: MovieCardProps) => {
     .slice(0, 2);
 
   const posterUrl = getPosterUrl(item.poster_path);
+  const showPoster = posterUrl && !imageError;
 
   return (
     <motion.article
@@ -55,17 +63,28 @@ const MovieCard = ({ item, index = 0, className }: MovieCardProps) => {
         delay: (index % 6) * 0.06,
       }}
       className={cn(
-        "group relative aspect-2/3 overflow-hidden rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl transition-colors duration-300 hover:border-white/25 hover:bg-white/9",
+        "group relative aspect-2/3 overflow-hidden rounded-2xl border border-white/10 bg-neutral-900 transition-colors duration-300 hover:border-white/25 hover:bg-neutral-800",
         className,
       )}
     >
-      {posterUrl && !imageError ? (
+      {/* Skeleton placeholder while the poster loads (prevents blank black flash) */}
+      {showPoster && !imageLoaded && (
+        <div className="absolute inset-0 animate-pulse bg-neutral-800" />
+      )}
+
+      {showPoster ? (
         <img
           src={posterUrl}
           alt={title}
-          loading="lazy"
+          loading={eager ? "eager" : "lazy"}
+          fetchPriority={eager ? "high" : "low"}
+          decoding="async"
+          onLoad={() => setImageLoaded(true)}
           onError={() => setImageError(true)}
-          className="size-full object-cover transition-transform duration-500 group-hover:scale-110"
+          className={cn(
+            "size-full object-cover transition-transform duration-500 group-hover:scale-110",
+            imageLoaded ? "opacity-100" : "opacity-0",
+          )}
         />
       ) : (
         <div className="flex size-full items-center justify-center bg-linear-to-br from-neutral-800 to-neutral-950">
@@ -82,11 +101,11 @@ const MovieCard = ({ item, index = 0, className }: MovieCardProps) => {
 
       {/* Top row: media type + rating */}
       <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-2 p-2.5 sm:p-3">
-        <span className="inline-flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white backdrop-blur-md">
+        <span className="inline-flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white">
           {isTV ? <Tv className="size-2.5" /> : <Film className="size-2.5" />}
           {mediaTypeLabel}
         </span>
-        <span className="inline-flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-semibold text-amber-400 backdrop-blur-md">
+        <span className="inline-flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-semibold text-amber-400">
           <Star className="size-3 fill-amber-400" />
           {rating}
         </span>
