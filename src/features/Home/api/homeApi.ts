@@ -48,3 +48,8 @@ export const getStreamingProviderList = async (): Promise<
     .sort((a, b) => a.priority - b.priority)
     .slice(0, 24);
 };
+
+
+export const getTopRatedMovies = () => {
+  return api.get<TMDBResponse<TMDBMediaItem>>('/discover/movie?sort_by=vote_average.desc&vote_count.gte=1000&language=en-US&page=1');
+};

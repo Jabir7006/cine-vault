@@ -3,6 +3,7 @@ import HomeComponent from "@/features/Home/Home";
 import {
   dailyTrendingOptions,
   streamingProvidersOptions,
+  topRatedMoviesOptions,
   weeklyTrendingOptions,
 } from "@/features/Home/hooks/useHomeQueries";
 
@@ -12,6 +13,7 @@ export const Route = createFileRoute("/")({
 
     void queryClient.prefetchQuery(streamingProvidersOptions);
     void queryClient.prefetchQuery(dailyTrendingOptions("movie"));
+    void queryClient.prefetchQuery(topRatedMoviesOptions)
   },
   component: HomeComponent,
 });
