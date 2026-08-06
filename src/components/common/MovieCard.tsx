@@ -12,6 +12,8 @@ interface MovieCardProps {
   index?: number;
   className?: string;
   eager?: boolean;
+  /** Override for discover endpoints which don't include media_type in results (e.g. /discover/tv). */
+  mediaType?: "movie" | "tv";
 }
 
 const getPosterUrl = (posterPath: string | null): string => {
@@ -25,6 +27,7 @@ const MovieCard = ({
   index = 0,
   className,
   eager = false,
+  mediaType,
 }: MovieCardProps) => {
   const [imageError, setImageError] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
@@ -40,7 +43,7 @@ const MovieCard = ({
   const year = releaseDate ? new Date(releaseDate).getFullYear() : undefined;
 
   const rating = item.vote_average ? item.vote_average.toFixed(1) : "N/A";
-  const isTV = item.media_type === "tv";
+  const isTV = mediaType === "tv" || item.media_type === "tv";
   const mediaTypeLabel = isTV ? "TV Series" : "Movie";
 
   const genres = item.genre_ids
