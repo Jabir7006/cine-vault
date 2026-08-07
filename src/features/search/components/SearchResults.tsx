@@ -4,6 +4,7 @@ import type { TMDBMediaItem } from "@/features/Home/types";
 
 interface SearchResultsProps {
   results: TMDBMediaItem[];
+  onSelect?: () => void;
 }
 
 const getPosterUrl = (posterPath: string | null): string => {
@@ -24,7 +25,7 @@ const getYear = (item: TMDBMediaItem): number | undefined => {
   return date ? new Date(date).getFullYear() : undefined;
 };
 
-export const SearchResults = ({ results }: SearchResultsProps) => (
+export const SearchResults = ({ results, onSelect }: SearchResultsProps) => (
   <ul className="max-h-80 overflow-y-auto scrollbar-thin [scrollbar-color:rgba(255,255,255,0.15)_transparent] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/15 [&::-webkit-scrollbar-thumb]:hover:bg-white/25">
     {results.map((item) => {
       const isTV = item.media_type === "tv";
@@ -37,6 +38,7 @@ export const SearchResults = ({ results }: SearchResultsProps) => (
           <Link
             to={isTV ? "/tv/$mediaId" : "/movie/$mediaId"}
             params={{ mediaId: String(item.id) }}
+            onClick={onSelect}
             className="flex items-center gap-3 rounded-xl px-2 py-2 transition-colors hover:bg-white/5"
           >
             {posterUrl ? (

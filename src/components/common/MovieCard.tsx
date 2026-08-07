@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { Film, Star, Tv } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 
 import type { TMDBMediaItem } from "@/features/Home/types";
 import { TMDB_GENRES } from "@/features/Home/types";
@@ -14,6 +15,8 @@ interface MovieCardProps {
   eager?: boolean;
   /** Override for discover endpoints which don't include media_type in results (e.g. /discover/tv). */
   mediaType?: "movie" | "tv";
+  /** Wrap the card in a Link to the details page. Defaults to true. */
+  linkToDetails?: boolean;
 }
 
 const getPosterUrl = (posterPath: string | null): string => {
@@ -28,6 +31,7 @@ const MovieCard = ({
   className,
   eager = false,
   mediaType,
+  linkToDetails = true,
 }: MovieCardProps) => {
   const [imageError, setImageError] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
@@ -54,23 +58,9 @@ const MovieCard = ({
   const posterUrl = getPosterUrl(item.poster_path);
   const showPoster = posterUrl && !imageError;
 
-  return (
-    <motion.article
-      initial={{ opacity: 0, y: 24 }}
-      whileInView={{ opacity: 1, y: 0 }}
-      whileHover={{ y: -6 }}
-      viewport={{ once: true, margin: "0px 0px -20px 0px" }}
-      transition={{
-        duration: 0.5,
-        ease: EASE_CINEMATIC,
-        delay: (index % 6) * 0.06,
-      }}
-      className={cn(
-        "group relative aspect-2/3 overflow-hidden rounded-2xl border border-white/10 bg-neutral-900 transition-colors duration-300 hover:border-white/25 hover:bg-neutral-800",
-        className,
-      )}
-    >
-      {/* Skeleton placeholder while the poster loads (prevents blank black flash) */}
+  const content = (
+    <>
+      {/* Skeleton placeholder while the poster loads */}
       {showPoster && !imageLoaded && (
         <div className="absolute inset-0 animate-pulse bg-neutral-800" />
       )}
@@ -129,6 +119,37 @@ const MovieCard = ({
           </div>
         )}
       </div>
+    </>
+  );
+
+  return (
+    <motion.article
+      initial={{ opacity: 0, y: 24 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      whileHover={{ y: -6 }}
+      viewport={{ once: true, margin: "0px 0px -20px 0px" }}
+      transition={{
+        duration: 0.5,
+        ease: EASE_CINEMATIC,
+        delay: (index % 6) * 0.06,
+      }}
+      className={cn(
+        "group relative aspect-2/3 overflow-hidden rounded-2xl border border-white/10 bg-neutral-900 transition-colors duration-300 hover:border-white/25 hover:bg-neutral-800",
+        className,
+      )}
+    >
+      {linkToDetails ? (
+        <Link
+          to={isTV ? "/tv/$mediaId" : "/movie/$mediaId"}
+          params={{ mediaId: String(item.id) }}
+          className="absolute inset-0"
+          aria-label={title}
+        >
+          {content}
+        </Link>
+      ) : (
+        content
+      )}
     </motion.article>
   );
 };

@@ -13,11 +13,16 @@ import type { TMDBMediaItem } from "@/features/Home/types";
 interface SearchSuggestionsProps {
   query: string;
   isOpen: boolean;
+  onSelect?: () => void;
 }
 
 const MAX_RESULTS = 8;
 
-export const SearchSuggestions = ({ query, isOpen }: SearchSuggestionsProps) => {
+export const SearchSuggestions = ({
+  query,
+  isOpen,
+  onSelect,
+}: SearchSuggestionsProps) => {
   const [filter, setFilter] = useState<SearchFilter>("all");
   const debouncedQuery = useDebouncedValue(query, 500);
 
@@ -86,7 +91,7 @@ export const SearchSuggestions = ({ query, isOpen }: SearchSuggestionsProps) => 
               </p>
             </div>
           ) : (
-            <SearchResults results={results} />
+            <SearchResults results={results} onSelect={onSelect} />
           )}
         </motion.div>
       )}

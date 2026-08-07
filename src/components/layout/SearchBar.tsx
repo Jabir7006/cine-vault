@@ -158,7 +158,11 @@ export const SearchBar = ({ variant }: SearchBarProps) => {
 
                   {/* Suggestions */}
                   <div className="px-2 py-2">
-                    <SearchSuggestions query={query} isOpen={true} />
+                    <SearchSuggestions
+                      query={query}
+                      isOpen={true}
+                      onSelect={handleClose}
+                    />
                   </div>
                 </div>
               </motion.div>
