@@ -3,6 +3,7 @@ import { Clapperboard } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NAV_ITEMS } from "@/config/navigation";
 import { cn } from "@/lib/utils";
+import { SearchBar } from "./SearchBar";
 
 export const DesktopNavbar = () => {
   return (
@@ -60,6 +61,12 @@ export const DesktopNavbar = () => {
             );
           })}
         </div>
+
+        {/* Vertical Divider */}
+        <div className="h-4 w-px bg-white/10 mx-1" />
+
+        {/* Search */}
+        <SearchBar variant="desktop" />
       </nav>
     </header>
   );

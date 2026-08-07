@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { Clapperboard, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { SearchBar } from "./SearchBar";
 
 export const MobileTopHeader = () => {
   return (
@@ -21,15 +22,18 @@ export const MobileTopHeader = () => {
           </Link>
         </Button>
 
-        {/* User Profile Button */}
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="size-8 rounded-full border border-white/15 bg-white/5 text-neutral-300 hover:text-white hover:bg-white/10"
-          aria-label="User profile"
-        >
-          <User className="w-4 h-4" />
-        </Button>
+        {/* Right side: Search + User */}
+        <div className="flex items-center gap-1.5">
+          <SearchBar variant="mobile" />
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="size-8 rounded-full border border-white/15 bg-white/5 text-neutral-300 hover:text-white hover:bg-white/10"
+            aria-label="User profile"
+          >
+            <User className="w-4 h-4" />
+          </Button>
+        </div>
       </div>
     </header>
   );
