@@ -1,0 +1,1 @@
+export type SearchFilter = "all" | "movie" | "tv";

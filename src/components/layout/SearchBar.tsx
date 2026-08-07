@@ -113,7 +113,7 @@ export const SearchBar = ({ variant }: SearchBarProps) => {
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: -20, scale: 0.96 }}
                 transition={{ duration: 0.2, ease: "easeOut" }}
-                className="relative w-full max-w-lg mx-4"
+                className="relative w-full max-w-2xl mx-4"
               >
                 <div className="rounded-2xl bg-neutral-950/90 backdrop-blur-2xl border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.6)] overflow-hidden">
                   {/* Search Input Row */}
@@ -135,6 +135,18 @@ export const SearchBar = ({ variant }: SearchBarProps) => {
                       placeholder="Search movies & TV shows..."
                       className="h-8 px-2 border-0 bg-transparent text-base text-neutral-200 placeholder:text-neutral-500 focus-visible:ring-0 shadow-none flex-1"
                     />
+                    {query && (
+                      <button
+                        onClick={() => {
+                          setQuery("");
+                          inputRef.current?.focus();
+                        }}
+                        className="shrink-0 text-neutral-500 hover:text-neutral-200 transition-colors p-1 rounded-full hover:bg-white/5"
+                        aria-label="Clear search"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
                     <button
                       onClick={handleClose}
                       className="shrink-0 text-neutral-500 hover:text-neutral-200 transition-colors p-1 rounded-full hover:bg-white/5"
