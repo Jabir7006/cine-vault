@@ -1,4 +1,5 @@
 import { Clock, Play, Star } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import {
   getMediaReleaseDate,
@@ -89,11 +90,18 @@ export const HeroInfo = ({ details, mediaType }: HeroInfoProps) => {
       {/* Actions */}
       <div className="mt-6 flex flex-wrap items-center gap-3">
         <Button
+          asChild
           size="lg"
           className="rounded-full bg-white text-neutral-900 hover:bg-neutral-200 hover:text-neutral-900 shadow-lg"
         >
-          <Play className="size-5 fill-current" />
-          Play Now
+          <Link
+            to="/watch/$mediaType/$mediaId"
+            params={{ mediaType, mediaId: String(details.id) }}
+            search={{ s: 1, e: 1 }}
+          >
+            <Play className="size-5 fill-current" />
+            Play Now
+          </Link>
         </Button>
         {details.homepage && (
           <Button

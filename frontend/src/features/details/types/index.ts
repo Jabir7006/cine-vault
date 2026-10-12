@@ -66,6 +66,15 @@ export interface SimilarMediaPart {
   total_results: number;
 }
 
+export interface TMDBSeasonSummary {
+  id: number;
+  name: string;
+  season_number: number;
+  episode_count: number;
+  air_date: string | null;
+  poster_path: string | null;
+}
+
 export interface TMDBMediaDetails {
   id: number;
   // Movie-specific
@@ -81,6 +90,7 @@ export interface TMDBMediaDetails {
   episode_run_time?: number[];
   number_of_seasons?: number;
   number_of_episodes?: number;
+  seasons?: TMDBSeasonSummary[];
   // Shared
   overview: string;
   tagline?: string;
