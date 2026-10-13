@@ -1,22 +1,39 @@
 export type MediaType = "movie" | "tv";
 
 export interface Subtitle {
+  id: string;
   lang: string;
   label: string;
   url: string;
 }
 
-/** A stream we serve through our own DASH relay + play in our own <video>. */
-export interface DashSource {
-  type: "dash";
-  provider: string;
+export interface DirectQuality {
+  id: string;
   label: string;
-  manifestUrl: string;
-  qualities?: number[];
-  subtitles?: Subtitle[];
+  url: string;
+  height?: number;
 }
 
-/** A third-party iframe embed that plays itself (no backend proxy needed). */
+export interface DirectAudio {
+  id: string;
+  label: string;
+  lang: string;
+}
+
+export interface DirectSource {
+  type: "direct";
+  provider: "moviebox";
+  label: string;
+  format: "progressive";
+  sessionId: string;
+  expiresAt: number;
+  renewAt: number;
+  qualities: DirectQuality[];
+  subtitles: Subtitle[];
+  audios: DirectAudio[];
+  selectedAudio: string;
+}
+
 export interface EmbedSource {
   type: "embed";
   provider: string;
@@ -24,7 +41,16 @@ export interface EmbedSource {
   embedUrl: string;
 }
 
-export type Source = DashSource | EmbedSource;
+export type Source = DirectSource | EmbedSource;
+
+export type MovieBoxStatus = "ready" | "blocked_setup" | "not_found" | "ambiguous" |
+  "unverified" | "unsupported_adaptive" | "unsupported_format" | "unavailable";
+
+export interface SourcesResponse {
+  version: 1;
+  sources: Source[];
+  moviebox: { status: MovieBoxStatus };
+}
 
 export interface ResolveParams {
   season?: number;

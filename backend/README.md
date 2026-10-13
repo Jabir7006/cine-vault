@@ -1,6 +1,6 @@
 # Cine Vault backend
 
-The Hono backend currently serves embed-only source candidates. MovieBox Phase2 adds a **server-only, independently testable signing/session/search client**; it does not change the source provider registry or routes, add media-resource/stream APIs, or integrate CinePro. No MovieBox credential belongs in the frontend.
+The Hono backend serves versioned source discovery with unchanged embed fallbacks. The first MovieBox integration supports conservatively matched, independently probed **progressive MP4 resources** through a closed capability relay and a native browser player. Missing setup, ambiguous matches, signed-policy resources requiring live verification, DASH/HLS, unknown codecs and unavailable media retain embeds. This is **not full MovieBox-Tui playback parity**; no live MovieBox playback has been verified. No MovieBox credential belongs in the frontend.
 
 ## Development and offline verification
 
@@ -19,7 +19,7 @@ The verification command without `--live` skips network access. Tests inject fet
 
 `MOVIEBOX_SECRET_HEX` must be supplied at runtime by the operator as **exactly 60 hexadecimal characters (30 bytes)**. There is no built-in credential or fallback. Missing, whitespace-padded, incorrectly sized, or non-hex values fail with a sanitized setup error before network access. These instructions do not provide or obtain a signing credential. Do not extract credentials from upstream source, populate committed examples, or send the key to the frontend.
 
-The existing backend config exposes `movieboxSecretHex`; only the opt-in script imports that config. The reusable modules accept the key through constructor options and do not import dotenv. No real `.env` is created or modified by Phase2.
+The reusable modules accept setup through constructor options and do not import dotenv. The server composes them lazily only when the runtime key, server TMDB token, relay key and explicit media-host allowlist are present and valid. Invalid setup produces `blocked_setup` while embeds stay available. No real `.env` is created or modified.
 
 When a legitimate runtime key is already available, explicit live verification is:
 
@@ -45,6 +45,17 @@ The command performs visitor login and searches for `Inception` twice. It prints
 - Visitor login sends `{}`. Sessions are memory-only and login is singleflight. JWT claims are unverified lifetime metadata, **not authorization verification**: use a 60-second expiry margin, or seven days for opaque/no-exp sessions. Invalid JWT-shaped payloads/expiries are not cached. Successful `x-user` rotation replaces the current session only if valid; blank/malformed tokens and stale concurrent responses cannot overwrite it.
 - Sanitized errors carry only a fixed message, error code, and optional numeric HTTP status. Diagnostics contain counts only. A failed singleflight login is cleared so a subsequent call may retry normally.
 
-Phase2 is deliberately not wired into the embed source aggregator. Future integration and upstream live availability remain separate work. `get`/`post` return the complete decoded `data` payload (or complete top-level JSON when there is no envelope) without selecting or dropping its fields, allowing later typed metadata adapters.
+## Progressive integration and relay limits
 
-Phase3 resolver/relay/player work must implement real MovieBox-Tui-like selectors: subtitles **Off + available languages**, actual alternate audio/dub mapping (which may require separate subject IDs), and resolution/**Auto** only when those choices truly exist. This phase adds no playback controls, fake options, or universal browser/codec compatibility promise.
+- `GET /api/sources/:type/:tmdbId?s=&e=` returns `{ version: 1, sources, moviebox: { status } }`. It retains the optional `x-access-token` discovery guard. Browser-visible frontend tokens are not confidential end-user authentication.
+- MovieBox lookup is bounded to four in-flight identities and a 12-second deadline; exact title/type/year and detail reconfirmation are required. TV requires explicit episode evidence. Mapping and short result caches are size-limited and separate from expiring capabilities.
+- Enable the relay only with `RELAY_SIGN_KEY` set to exactly 64 random hex characters (32 bytes) and `MOVIEBOX_MEDIA_HOSTS` containing exact independently approved CDN hostnames. `MOVIEBOX_CAPTION_HOSTS` is a separate allowlist. No built-in hosts or insecure relay key are provided. Example values are empty deliberately.
+- `GET`/`HEAD /media/:capability` authenticates an opaque short-lived HMAC capability, not an arbitrary URL or browser-supplied upstream headers. Native video/track requests cannot send the Axios access header. Capability URLs are bearer capabilities: do not share or log them.
+- The transport validates all DNS answers, rejects nonpublic and mapped/transition addresses, pins the selected IP at connection, retains hostname TLS verification, rejects redirects and forwards only bounded descriptor-owned headers. Captions never receive CDN cookies. Only single-byte ranges and validated 200/206/416 MP4 responses are supported.
+- Progressive eligibility requires actual MP4 `ftyp` evidence plus explicit H264/AVC codec and quality metadata. This does not verify every in-file audio/video codec or guarantee playback on every browser; native failures retain provider switching.
+- SRT/WebVTT captions are bounded, decoded strictly and converted to plain-text WebVTT. ASS/SSA/SUB are omitted. Missing/unavailable captions do not discard verified video.
+- The native player provides real manual qualities and available subtitles + Off. There is no fake progressive Auto mode. Quality changes restart at zero because timeline alignment is unproven. The current audio label is informational; alternate dub switching is **not implemented** yet.
+- Sessions/capabilities are memory-local, default to five minutes and honor known upstream expiry with a 60-second margin. Restarts/eviction invalidate them; multiple instances need sticky routing or a shared implementation. This increment uses explicit playback refresh, not transparent automatic renewal.
+- Signed-policy resources remain `unverified`; DASH/HLS remain unsupported. Live credentials, CDN policy and actual movie/TV/caption/dub playback must be separately verified before adding adaptive playback. The device video-app action and CinePro remain deferred.
+
+`get`/`post` retain complete decoded API payloads; typed adapters expose only bounded private metadata. Offline fixtures and a locally generated video can verify application behavior, not upstream compatibility.

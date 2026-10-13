@@ -1,23 +1,45 @@
 import { getEmbedSources } from "./embed";
-import type { MediaType, ResolveParams, Source } from "./types";
+import type { DirectSource, MediaType, MovieBoxStatus, ResolveParams, SourcesResponse } from "./types";
 
-/**
- * List source candidates for a title, ordered by preference.
- * MovieBox integration is planned but not implemented. Embed URLs are generated
- * without checking provider availability or whether the requested title plays.
- */
-export async function getSources(
-  type: MediaType,
-  tmdbId: string,
-  params: ResolveParams = {},
-): Promise<Source[]> {
-  const sources: Source[] = [];
-
-  // TODO(phase 2-3): prepend MovieBox dash sources (primary) here.
-
-  sources.push(...getEmbedSources(type, tmdbId, params));
-
-  return sources;
+export interface MovieBoxResolution {
+  status: MovieBoxStatus;
+  source?: DirectSource;
 }
 
+export type MovieBoxResolver = (
+  type: MediaType,
+  tmdbId: string,
+  params: ResolveParams,
+  signal?: AbortSignal,
+) => Promise<MovieBoxResolution>;
+
+/** A MovieBox miss must not prevent discovery of the unchanged embed candidates. */
+export function createSourceService(resolveMovieBox?: MovieBoxResolver) {
+  return async (
+    type: MediaType,
+    tmdbId: string,
+    params: ResolveParams = {},
+    signal?: AbortSignal,
+  ): Promise<SourcesResponse> => {
+    let result: MovieBoxResolution = { status: "blocked_setup" };
+    if (resolveMovieBox) {
+      try {
+        result = await resolveMovieBox(type, tmdbId, params, signal);
+      } catch {
+        result = { status: "unavailable" };
+      }
+    }
+    if (result.status === "ready" && !result.source) result = { status: "unavailable" };
+    return {
+      version: 1,
+      moviebox: { status: result.status },
+      sources: [
+        ...(result.status === "ready" && result.source ? [result.source] : []),
+        ...getEmbedSources(type, tmdbId, params),
+      ],
+    };
+  };
+}
+
+export const getSources = createSourceService();
 export type { Source } from "./types";

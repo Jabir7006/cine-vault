@@ -3,10 +3,11 @@ import api from "@/lib/api";
 import { parseSeasonMetadata } from "./episodes";
 import type { MediaType } from "@/features/details/types";
 import type { SourcesResponse } from "./types";
+import { parseSourcesResponse } from "./source-response";
 
 /**
  * Fetch source candidates from the backend; availability is not guaranteed.
- * MovieBox playback will be added after the client and relay are implemented.
+ * Direct capabilities are validated before resolving them against the backend origin.
  * `season`/`episode` are ignored by the backend for movies.
  */
 export const getSources = (
@@ -15,9 +16,18 @@ export const getSources = (
   opts?: { season?: number; episode?: number },
   signal?: AbortSignal,
 ) =>
-  backendApi.get<SourcesResponse>(`/api/sources/${type}/${tmdbId}`, {
+  backendApi.get<unknown>(`/api/sources/${type}/${tmdbId}`, {
     params: { s: opts?.season, e: opts?.episode },
     signal,
+  }).then((response) => {
+    const data = parseSourcesResponse(response.data);
+    const origin = new URL(backendApi.defaults.baseURL ?? "/", window.location.origin).origin;
+    const sources: SourcesResponse["sources"] = data.sources.map((source) => source.type === "embed" ? source : {
+      ...source,
+      qualities: source.qualities.map((quality) => ({ ...quality, url: new URL(quality.url, origin).href })),
+      subtitles: source.subtitles.map((subtitle) => ({ ...subtitle, url: new URL(subtitle.url, origin).href })),
+    });
+    return { ...response, data: { ...data, sources } };
   });
 
 export const getSeasonMetadata = async (

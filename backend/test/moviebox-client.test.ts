@@ -24,6 +24,24 @@ const isLogin = (call: Call) => call.url.endsWith("/user-api/visitor-login");
 const rejects = (promise: Promise<unknown>, code: string, status?: number) => assert.rejects(promise,
   (error: unknown) => error instanceof MovieBoxError && error.code === code && (status === undefined || error.status === status));
 
+test("caller cancellation aborts metadata requests without host hopping", async () => {
+  const controller = new AbortController();
+  const { client, calls } = fixture((call) => {
+    if (isLogin(call)) return login();
+    return new Promise<Response>((_resolve, reject) => {
+      call.init.signal!.addEventListener("abort", () => reject(new Error("fixture abort")), { once: true });
+      controller.abort();
+    });
+  });
+  await client.init();
+  await rejects(client.get("/wefeed-mobile-bff/subject-api/get?subjectId=1", controller.signal), "timeout");
+  assert.equal(calls.length, 2);
+  const stopped = new AbortController();
+  stopped.abort();
+  await rejects(client.search("Fixture", 1, stopped.signal), "timeout");
+  assert.equal(calls.length, 2);
+});
+
 test("missing secret blocks setup before any fetch and diagnostics reveal counts only", async () => {
   let fetched = false;
   assert.throws(() => new MovieBoxClient({ fetch: (async () => { fetched = true; return login(); }) as typeof fetch }), MovieBoxError);

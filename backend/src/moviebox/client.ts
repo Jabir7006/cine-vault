@@ -85,7 +85,7 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
   }
 }
 
-/** Server-only transport; no media resource/stream APIs or source-aggregator integration. */
+/** Server-only runtime transport; typed metadata and media relay live in separate modules. */
 export class MovieBoxClient {
   #key: Buffer;
   #fetch: typeof globalThis.fetch;
@@ -136,31 +136,32 @@ export class MovieBoxClient {
     return session;
   }
 
-  async get(path: string): Promise<unknown> { return this.#request("GET", path, undefined, true); }
+  async get(path: string, signal?: AbortSignal): Promise<unknown> { return this.#request("GET", path, undefined, true, signal); }
 
   /** POST has no implicit replay. Opt in only for a known read-only operation. */
-  async post(path: string, body: unknown, options: { safeToReplay?: boolean } = {}): Promise<unknown> {
+  async post(path: string, body: unknown, options: { safeToReplay?: boolean; signal?: AbortSignal } = {}): Promise<unknown> {
     let serialized: string | undefined;
     try { serialized = JSON.stringify(body); } catch { throw new MovieBoxError("request"); }
     if (serialized === undefined) throw new MovieBoxError("request");
-    return this.#request("POST", path, serialized, options.safeToReplay === true);
+    return this.#request("POST", path, serialized, options.safeToReplay === true, options.signal);
   }
 
-  async search(keyword: string, page = 1): Promise<unknown> {
+  async search(keyword: string, page = 1, signal?: AbortSignal): Promise<unknown> {
     if (typeof keyword !== "string" || !keyword.trim() || keyword.length > 256 || !Number.isSafeInteger(page) || page < 1) {
       throw new MovieBoxError("request");
     }
     this.#counts.searchRequests++;
-    return this.post(SEARCH_PATH, { keyword, page, perPage: 15, subjectType: 0 }, { safeToReplay: true });
+    return this.post(SEARCH_PATH, { keyword, page, perPage: 15, subjectType: 0 }, { safeToReplay: true, signal });
   }
 
-  async #request(method: string, path: string, body: string | undefined, safeToReplay: boolean): Promise<unknown> {
+  async #request(method: string, path: string, body: string | undefined, safeToReplay: boolean, signal?: AbortSignal): Promise<unknown> {
+    if (signal?.aborted) throw new MovieBoxError("timeout");
     validatePath(path); // Reject paths before login or any network activity.
     if (body !== undefined && Buffer.byteLength(body) > MAX_BODY_BYTES) throw new MovieBoxError("request");
     let session = await this.#ensureSession();
     for (let refresh = 0; refresh < 2; refresh++) {
       try {
-        const reply = await this.#requestHosts(method, path, body, session.token, safeToReplay);
+        const reply = await this.#requestHosts(method, path, body, session.token, safeToReplay, signal);
         // Ignore stale concurrent responses after a newer token/session won.
         if (reply.rotation && this.#session?.token === session.token && valid(reply.rotation, this.#now())) {
           this.#session = reply.rotation;
@@ -175,18 +176,19 @@ export class MovieBoxClient {
     throw new MovieBoxError("unauthorized", 401);
   }
 
-  async #requestHosts(method: string, path: string, body: string | undefined, token: string | undefined, safeToReplay: boolean): Promise<Reply> {
+  async #requestHosts(method: string, path: string, body: string | undefined, token: string | undefined, safeToReplay: boolean, signal?: AbortSignal): Promise<Reply> {
     validatePath(path);
     const start = this.#activeHost;
     const attempts = safeToReplay ? this.#maxAttempts : 1;
     let lastError = new MovieBoxError("network");
     for (let attempt = 0; attempt < attempts; attempt++) {
+      if (signal?.aborted) throw new MovieBoxError("timeout");
       const index = (start + attempt) % MOVIEBOX_HOSTS.length;
       const url = MOVIEBOX_HOSTS[index]! + path;
       const headers = signedHeaders(this.#key, this.#identity, method, url, body, this.#now(), token);
       this.#counts.httpAttempts++;
       try {
-        const reply = await this.#attempt(url, { method, headers, body, redirect: "manual" });
+        const reply = await this.#attempt(url, { method, headers, body, redirect: "manual" }, signal);
         this.#activeHost = index;
         return reply;
       } catch (error) {
@@ -199,8 +201,11 @@ export class MovieBoxClient {
     throw lastError;
   }
 
-  async #attempt(url: string, init: RequestInit): Promise<Reply> {
+  async #attempt(url: string, init: RequestInit, signal?: AbortSignal): Promise<Reply> {
     const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) controller.abort();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
@@ -231,6 +236,6 @@ export class MovieBoxClient {
     };
     try { return await Promise.race([work(), deadline]); }
     catch (error) { throw error instanceof MovieBoxError ? error : new MovieBoxError("network"); }
-    finally { clearTimeout(timer); controller.abort(); }
+    finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); controller.abort(); }
   }
 }

@@ -1,16 +1,35 @@
 export interface Subtitle {
+  id: string;
   lang: string;
   label: string;
   url: string;
 }
 
-export interface DashSource {
-  type: "dash";
-  provider: string;
+export interface DirectQuality {
+  id: string;
   label: string;
-  manifestUrl: string;
-  qualities?: number[];
-  subtitles?: Subtitle[];
+  url: string;
+  height?: number;
+}
+
+export interface DirectAudio {
+  id: string;
+  label: string;
+  lang: string;
+}
+
+export interface DirectSource {
+  type: "direct";
+  provider: "moviebox";
+  label: string;
+  format: "progressive";
+  sessionId: string;
+  expiresAt: number;
+  renewAt: number;
+  qualities: DirectQuality[];
+  subtitles: Subtitle[];
+  audios: DirectAudio[];
+  selectedAudio: string;
 }
 
 export interface EmbedSource {
@@ -20,10 +39,15 @@ export interface EmbedSource {
   embedUrl: string;
 }
 
-export type Source = DashSource | EmbedSource;
+export type Source = DirectSource | EmbedSource;
 
 export interface SourcesResponse {
+  version: 1;
   sources: Source[];
+  moviebox: {
+    status: "ready" | "blocked_setup" | "not_found" | "ambiguous" | "unverified" |
+      "unsupported_adaptive" | "unsupported_format" | "unavailable";
+  };
 }
 
 export interface TMDBEpisode {

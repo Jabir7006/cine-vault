@@ -11,7 +11,7 @@ export const watchSourcesOptions = (
   queryOptions({
     queryKey: ["watch-sources", type, tmdbId, type === "tv" ? season : 1, type === "tv" ? episode : 1],
     queryFn: ({ signal }) =>
-      getSources(type, tmdbId, type === "tv" ? { season, episode } : undefined, signal).then((r) => r.data.sources),
+      getSources(type, tmdbId, type === "tv" ? { season, episode } : undefined, signal).then((r) => r.data),
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     staleTime: 5 * 60 * 1000,

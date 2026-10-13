@@ -23,7 +23,9 @@ export const config = {
     apiKey: env("TMDB_API_KEY"),
   },
   /** HMAC key for signing relay URLs so the stream proxy only serves URLs it minted. */
-  relaySignKey: env("RELAY_SIGN_KEY", "dev-insecure-relay-key-change-me"),
+  relaySignKey: env("RELAY_SIGN_KEY"),
+  mediaHosts: env("MOVIEBOX_MEDIA_HOSTS").split(",").map((host) => host.trim()).filter(Boolean),
+  captionHosts: env("MOVIEBOX_CAPTION_HOSTS").split(",").map((host) => host.trim()).filter(Boolean),
   /** Server-only runtime signing key; there is no built-in credential. */
   movieboxSecretHex: env("MOVIEBOX_SECRET_HEX"),
 } as const;
