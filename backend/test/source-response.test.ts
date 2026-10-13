@@ -10,7 +10,8 @@ const capability = (kind = "video", suffix = "a") =>
 
 const direct = () => ({
   type: "direct", provider: "moviebox", label: "MovieBox", format: "progressive",
-  sessionId: "session_1", renewAt: 900_000, expiresAt: 1_000_000,
+  sessionId: "session_1", issuedAt: 400_000, revision: 1, controlToken: "C".repeat(42) + "A",
+  controlExpiresAt: 1_030_000, renewAt: 900_000, expiresAt: 1_000_000,
   qualities: [
     { id: "quality_720", label: "720p", url: capability(), height: 720 },
     { id: "quality_1080", label: "1080p", url: capability("video", "b"), height: 1080 },
@@ -23,8 +24,8 @@ const embed = () => ({
   type: "embed", provider: "example", label: "Example provider", embedUrl: "https://example.test/player?id=1",
 });
 
-const ready = () => ({ version: 1, moviebox: { status: "ready" }, sources: [direct(), embed()] });
-const fallback = (status = "blocked_setup") => ({ version: 1, moviebox: { status }, sources: [embed()] });
+const ready = () => ({ version: 2, moviebox: { status: "ready" }, sources: [direct(), embed()] });
+const fallback = (status = "blocked_setup") => ({ version: 2, moviebox: { status }, sources: [embed()] });
 
 const rejects = (value: unknown) => assert.throws(
   () => parseSourcesResponse(value),
@@ -37,12 +38,12 @@ const mutateDirect = (change: (value: Record<string, unknown>) => void) => {
   rejects(value);
 };
 
-test("v1 parser accepts actual progressive choices and preserves fallback order", () => {
+test("v2 parser accepts actual progressive choices and preserves fallback order", () => {
   const value = ready();
   assert.deepEqual(parseSourcesResponse(value), value);
   assert.deepEqual(parseSourcesResponse(fallback()), fallback());
-  assert.deepEqual(parseSourcesResponse({ version: 1, moviebox: { status: "not_found" }, sources: [] }), {
-    version: 1, moviebox: { status: "not_found" }, sources: [],
+  assert.deepEqual(parseSourcesResponse({ version: 2, moviebox: { status: "not_found" }, sources: [] }), {
+    version: 2, moviebox: { status: "not_found" }, sources: [],
   });
 });
 
@@ -63,9 +64,25 @@ test("all known non-ready states retain embeds; unknown statuses and versions fa
   for (const status of ["blocked_setup", "not_found", "ambiguous", "unverified", "unsupported_adaptive", "unsupported_format", "unavailable"]) {
     assert.equal(parseSourcesResponse(fallback(status)).moviebox.status, status);
   }
-  for (const value of [null, undefined, [], "ready", {}, { ...ready(), version: 2 }, { ...ready(), version: "1" },
+  for (const value of [null, undefined, [], "ready", {}, { ...ready(), version: 1 }, { ...ready(), version: 3 }, { ...ready(), version: "2" },
     { ...ready(), moviebox: null }, { ...ready(), moviebox: { status: "unsupported" } },
     { ...ready(), moviebox: { status: "READY" } }, { ...ready(), sources: null }]) rejects(value);
+});
+
+test("only finite setup reasons on blocked_setup are accepted and projected", () => {
+  for (const reason of ["missing_signing_key", "invalid_signing_key", "missing_tmdb_token",
+    "missing_media_hosts", "invalid_relay_key", "invalid_configuration"]) {
+    const value = { ...fallback(), moviebox: { status: "blocked_setup", reason, privateDetail: "ignored" } };
+    assert.deepEqual(parseSourcesResponse(value).moviebox, { status: "blocked_setup", reason });
+  }
+  assert.deepEqual(parseSourcesResponse(fallback()).moviebox, { status: "blocked_setup" });
+  for (const reason of [undefined, null, "", "unknown", "missing_signing_key\n", {}, 1]) {
+    rejects({ ...fallback(), moviebox: { status: "blocked_setup", reason } });
+  }
+  for (const status of ["not_found", "ambiguous", "unverified", "unsupported_adaptive", "unsupported_format", "unavailable"]) {
+    rejects({ ...fallback(status), moviebox: { status, reason: "missing_signing_key" } });
+  }
+  rejects({ ...ready(), moviebox: { status: "ready", reason: "missing_signing_key" } });
 });
 
 test("unsupported legacy/adaptive source types and inconsistent ready states fail", () => {
@@ -124,18 +141,29 @@ test("expiry is safe millisecond metadata with a bounded deterministic renewal w
   }
   mutateDirect((source) => { source.renewAt = source.expiresAt; });
   mutateDirect((source) => { source.renewAt = 1_000_001; });
+  mutateDirect((source) => { source.issuedAt = 399_999; });
   mutateDirect((source) => { source.renewAt = 399_999; });
   const value = ready();
   (value.sources[0] as ReturnType<typeof direct>).renewAt = 400_000;
   assert.equal(parseSourcesResponse(value).sources[0]?.type, "direct");
   // Deliberately past timestamps remain valid JSON; expiry belongs to the UI.
   const past = ready();
-  Object.assign(past.sources[0]!, { renewAt: 1, expiresAt: 2 });
+  Object.assign(past.sources[0]!, { issuedAt: 1, renewAt: 1, expiresAt: 2, controlExpiresAt: 3 });
   assert.equal(parseSourcesResponse(past).sources[0]?.type, "direct");
 });
 
+test("v2 requires safe generation issuance, revision and canonical memory-only control capability", () => {
+  for (const field of ["issuedAt", "revision", "controlToken", "controlExpiresAt"]) mutateDirect((source) => { delete source[field]; });
+  for (const value of [0, -1, 1.5, NaN, "1", Number.MAX_SAFE_INTEGER + 1]) mutateDirect((source) => { source.revision = value; });
+  for (const value of ["", "token", "C".repeat(43), `${"C".repeat(42)}=`, "A".repeat(44), "/media/token", null]) {
+    mutateDirect((source) => { source.controlToken = value; });
+  }
+  for (const value of [0, 400_000, 1_030_001, "1000000"]) mutateDirect((source) => { source.controlExpiresAt = value; });
+  mutateDirect((source) => { source.issuedAt = 900_001; });
+});
+
 test("quality lists require nonempty bounded actual distinct options", () => {
-  for (const qualities of [[], null, "720p", Array(1), Array.from({ length: 17 }, (_, index) => ({
+  for (const qualities of [[], null, "720p", Array(1), Array.from({ length: 9 }, (_, index) => ({
     id: `q${index}`, label: `${index}p`, url: `/media/token${index}`,
   }))]) mutateDirect((source) => { source.qualities = qualities; });
   for (const field of ["id", "url", "label"] as const) {
@@ -162,10 +190,10 @@ test("subtitle/audio lists require valid IDs, languages, membership and bounds",
   mutateDirect((source) => { source.subtitles = [{ ...direct().subtitles[0], id: "off" }]; });
   mutateDirect((source) => { source.subtitles = [direct().subtitles[0], direct().subtitles[0]]; });
   mutateDirect((source) => { source.subtitles = Array(1); });
-  mutateDirect((source) => { source.subtitles = Array(33).fill(direct().subtitles[0]); });
+  mutateDirect((source) => { source.subtitles = Array(9).fill(direct().subtitles[0]); });
   mutateDirect((source) => { source.audios = []; });
   mutateDirect((source) => { source.audios = null; });
-  mutateDirect((source) => { source.audios = Array(17).fill(direct().audios[0]); });
+  mutateDirect((source) => { source.audios = Array(9).fill(direct().audios[0]); });
   mutateDirect((source) => { source.audios = [direct().audios[0], direct().audios[0]]; });
   mutateDirect((source) => { source.selectedAudio = "not_an_available_audio"; });
   mutateDirect((source) => { source.sessionId = ""; });

@@ -168,7 +168,7 @@ export class MovieBoxClient {
         }
         return reply.data;
       } catch (error) {
-        if (!(error instanceof MovieBoxError) || error.code !== "unauthorized" || !safeToReplay || refresh !== 0) throw error;
+        if (!(error instanceof MovieBoxError) || !(error.code === "unauthorized" || error.code === "denied") || !safeToReplay || refresh !== 0) throw error;
         if (this.#session?.token === session.token) this.#session = undefined;
         session = await this.#ensureSession(); // singleflight; refresh once, never for 403/429.
       }
@@ -193,8 +193,11 @@ export class MovieBoxClient {
         return reply;
       } catch (error) {
         const sanitized = error instanceof MovieBoxError ? error : new MovieBoxError("network");
+        // 403 ('denied') propagates to #request for session refresh — not retried here.
+        // 406, 407, 429 ('rate_limit', 'http') and 5xx get host failover here.
+        const failoverStatus = [406, 407, 429, 500, 502, 503, 504];
         if (!(sanitized.code === "network" || sanitized.code === "timeout" ||
-              (sanitized.code === "http" && [500, 502, 503, 504].includes(sanitized.status ?? 0)))) throw sanitized;
+              failoverStatus.includes(sanitized.status ?? 0))) throw sanitized;
         lastError = sanitized;
       }
     }

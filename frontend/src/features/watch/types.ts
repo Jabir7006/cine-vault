@@ -24,6 +24,10 @@ export interface DirectSource {
   label: string;
   format: "progressive";
   sessionId: string;
+  issuedAt: number;
+  revision: number;
+  controlToken: string;
+  controlExpiresAt: number;
   expiresAt: number;
   renewAt: number;
   qualities: DirectQuality[];
@@ -41,13 +45,56 @@ export interface EmbedSource {
 
 export type Source = DirectSource | EmbedSource;
 
+export type MovieBoxSetupReason = "missing_signing_key" | "invalid_signing_key" | "missing_tmdb_token" |
+  "missing_media_hosts" | "invalid_relay_key" | "invalid_configuration";
+
 export interface SourcesResponse {
-  version: 1;
+  version: 2;
   sources: Source[];
   moviebox: {
     status: "ready" | "blocked_setup" | "not_found" | "ambiguous" | "unverified" |
       "unsupported_adaptive" | "unsupported_format" | "unavailable";
+    reason?: MovieBoxSetupReason;
   };
+}
+
+export type PlaybackContinuity = { kind: "none" } | { kind: "same-resource"; qualityId: string };
+
+export interface PreparedPlayback {
+  version: 1;
+  kind: "prepared";
+  baseRevision: number;
+  preparationId: string;
+  preparationExpiresAt: number;
+  source: DirectSource;
+  continuity: PlaybackContinuity;
+}
+
+export interface PlaybackStateReply {
+  version: 1;
+  kind: "committed" | "state";
+  source: DirectSource;
+  pending?: PreparedPlayback | null;
+}
+
+export interface PlaybackErrorReply {
+  version: 1;
+  kind: "error";
+  code: string;
+}
+
+export type PlaybackReply = PreparedPlayback | PlaybackStateReply | PlaybackErrorReply;
+export interface PreparePlaybackRequest {
+  version: 1;
+  baseRevision: number;
+  reason: "renew" | "audio";
+  audioId?: string;
+  qualityId?: string;
+}
+export interface CommitPlaybackRequest {
+  version: 1;
+  baseRevision: number;
+  preparationId: string;
 }
 
 export interface TMDBEpisode {

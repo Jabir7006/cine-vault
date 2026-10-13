@@ -5,8 +5,61 @@ import { createMediaRegistry } from "../src/media/registry";
 import { createSourceService } from "../src/providers";
 import { parseSourcesResponse } from "../../frontend/src/features/watch/source-response";
 import { MovieBoxMetadata } from "../src/moviebox/metadata";
+import { MovieBoxClient } from "../src/moviebox/client";
 import { createMovieBoxResolver } from "../src/moviebox/resolver";
 import type { MediaTransport } from "../src/media/types";
+
+test("cold source discovery initializes anonymous visitor session automatically without init or user login", async () => {
+  const subject = { subjectId: "12345", title: "Synthetic Visitor Film", subjectType: 1, year: 2020 };
+  const requests: string[] = [];
+  let logins = 0;
+  const client = new MovieBoxClient({
+    movieboxSecretHex: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d",
+    identity: { userAgent: "synthetic-client", clientInfo: '{"device_id":"synthetic-device"}' },
+    maxAttempts: 1,
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      requests.push(url.pathname);
+      if (url.pathname.endsWith("/visitor-login")) {
+        logins++;
+        assert.equal(init?.body, "{}");
+        assert.equal(new Headers(init?.headers).get("authorization"), null);
+        return Response.json({ data: { token: "synthetic-visitor-session" } });
+      }
+      assert.equal(new Headers(init?.headers).get("authorization"), "Bearer synthetic-visitor-session");
+      const data = url.pathname.endsWith("/search/v2") ? { list: [subject] } :
+        url.pathname.endsWith("/get") ? subject :
+        url.pathname.endsWith("/resource") ? { resources: [{ resourceId: "999", resourceLink: "https://cdn.example.test/fixture.mp4", resolution: 720, codec: "H264", format: "MP4" }] } :
+        url.pathname.endsWith("/play-info/v2") ? { streams: [] } : { extCaptions: [] };
+      return Response.json({ data });
+    },
+  });
+  const registry = createMediaRegistry({ signingKey: "cd".repeat(32) });
+  const transport: MediaTransport = { probe: async () => true, caption: async () => "WEBVTT\n", relay: async () => new Response(null) };
+  const resolver = createMovieBoxResolver({
+    registry, transport,
+    lookup: async () => ({ type: "movie", titles: [subject.title], year: subject.year }),
+    metadata: (signal) => new MovieBoxMetadata({
+      get: (path) => client.get(path, signal), search: (keyword, page) => client.search(keyword, page, signal),
+    }),
+  });
+  const app = createApp({ allowedOrigins: [], sources: createSourceService(resolver) });
+  // Deliberately do not call client.init(), submit a username/password or preload a token.
+  const responses = await Promise.all([app.request("/api/sources/movie/42"), app.request("/api/sources/movie/43")]);
+  responses.push(await app.request("/api/sources/movie/44"));
+  const direct = [];
+  for (const response of responses) {
+    const parsed = parseSourcesResponse(await response.json());
+    assert.equal(parsed.moviebox.status, "ready");
+    assert.ok(parsed.sources[0]?.type === "direct");
+    direct.push(parsed.sources[0]);
+  }
+  assert.equal(new Set(direct.map((source) => source.sessionId)).size, 3);
+  assert.equal(new Set(direct.map((source) => source.controlToken)).size, 3);
+  assert.equal(logins, 1);
+  assert.equal(requests[0], "/wefeed-mobile-bff/user-api/visitor-login");
+  assert.ok(client.diagnostics().sessionReuses > 0);
+});
 
 // Synthetic endpoint shapes; this tests contract composition, not upstream compatibility.
 test("discovery -> strict frontend parser -> independently authenticated media capability", async () => {

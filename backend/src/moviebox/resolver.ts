@@ -1,209 +1,332 @@
-import { randomBytes } from "node:crypto";
 import type { MovieBoxResolver, MovieBoxResolution } from "../providers";
-import type { DirectQuality, DirectSource, MediaType, ResolveParams, Subtitle } from "../providers/types";
-import type { MediaRegistry, MediaResource, MediaTransport } from "../media/types";
+import type { MediaType, MovieBoxStatus, ResolveParams } from "../providers/types";
+import { isMediaRepresentation, mediaProbeFailureCodes } from "../media/types";
+import { TransportError } from "../media/transport";
+import { emitMovieBoxDiagnostic, movieBoxFailure, projectDiscoveryFailure } from "./diagnostics";
+import type { DiagnosticStage, DiscoveryFailure, MovieBoxDiagnosticCallback } from "./diagnostics";
+import type { MediaProbeEvidence, MediaResource, MediaRegistry, MediaTransport } from "../media/types";
 import { MovieBoxMetadata, classifyStream } from "./metadata";
-import type { PrivateStreamMetadata, SubjectDetail } from "./metadata";
-import { hasEpisodeEvidence, matchMovieBoxSubject } from "./matching";
+import { MovieBoxError } from "./errors";
+import type { DubMetadata, PrivateStreamMetadata, SubjectDetail } from "./metadata";
+import { hasEpisodeEvidence, identityMatches, matchMovieBoxSubject } from "./matching";
 import type { TitleIdentity } from "./tmdb";
+import { createPlaybackSessions } from "./playback-sessions";
+import type { PlaybackBinding, PlaybackSessions, PrivateAudio, PrivateDiscovery } from "./playback-sessions";
 
-const opaqueId = () => randomBytes(18).toString("base64url");
+type DiscoveryResult = { status: MovieBoxStatus; discovery?: PrivateDiscovery };
+interface WorkContext {
+  signal: AbortSignal; deadline: number; tasks: Set<Promise<unknown>>;
+  stage: DiagnosticStage; failure?: DiscoveryFailure;
+}
+const safeLabel = (value: string | undefined): value is string => typeof value === "string" && value.length > 0 && value.length <= 120 && !/[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]/u.test(value);
+const safeLanguage = (value: string | undefined): value is string => typeof value === "string" && value.length <= 35 && /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(value);
 
-/** The resolver never promotes API format labels or signed policies to playback evidence. */
+/** Private descriptor singleflight; every public response owns fresh mutable capabilities. */
 export function createMovieBoxResolver(options: {
   metadata: (signal: AbortSignal) => MovieBoxMetadata;
   lookup: (type: MediaType, id: string, signal?: AbortSignal) => Promise<TitleIdentity | undefined>;
   registry: MediaRegistry;
   transport: MediaTransport;
   now?: () => number;
-}): MovieBoxResolver {
+  diagnostic?: MovieBoxDiagnosticCallback;
+}): MovieBoxResolver & { playback: PlaybackSessions } {
   const now = options.now ?? Date.now;
-  const mappings = new Map<string, { subject: SubjectDetail; expiresAt: number }>();
-  const results = new Map<string, { result: MovieBoxResolution; expiresAt: number }>();
-  const flights = new Map<string, Promise<MovieBoxResolution>>();
+  const mappings = new Map<string, { binding: PlaybackBinding; subject: SubjectDetail; expiresAt: number }>();
+  const results = new Map<string, { result: DiscoveryResult; expiresAt: number }>();
+  const flights = new Map<string, { result: Promise<DiscoveryResult>; settled: boolean }>();
   const prune = () => {
     for (const cache of [mappings, results]) {
       for (const [key, entry] of cache) if (entry.expiresAt <= now()) cache.delete(key);
-      while (cache.size >= 128) cache.delete(cache.keys().next().value!);
+      while (cache.size > 128) cache.delete(cache.keys().next().value!);
     }
   };
-
-  const work = async (type: MediaType, id: string, params: ResolveParams, signal: AbortSignal): Promise<MovieBoxResolution> => {
-    const workDeadline = performance.now() + 10000;
-    const metadata = options.metadata(signal);
+  const track = <T>(context: WorkContext, task: Promise<T>): Promise<T> => {
+    context.tasks.add(task);
+    void task.finally(() => context.tasks.delete(task)).catch(() => undefined);
+    return task;
+  };
+  const budget = async <T>(context: WorkContext, ms: number, callback: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> => {
+    const remaining = Math.min(ms, context.deadline - performance.now());
+    if (remaining <= 0 || context.signal.aborted) return undefined;
+    const controller = new AbortController();
+    const signal = AbortSignal.any([context.signal, controller.signal]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => { controller.abort(); resolve(undefined); }, remaining);
+    });
+    try { return await Promise.race([track(context, callback(signal)).catch(() => undefined), timeout]); }
+    finally { clearTimeout(timer); controller.abort(); }
+  };
+  const loadAudio = async (binding: PlaybackBinding, subject: SubjectDetail, context: WorkContext, label: string, lang: string, optional = false): Promise<{ audio?: PrivateAudio; status: MovieBoxStatus }> => {
+    const metadata = options.metadata(context.signal);
+    const resources: PrivateStreamMetadata[] = [];
+    let resourceFailure: DiscoveryFailure | undefined;
+    context.stage = "resources";
+    for (let page = 1; page <= 2; page++) {
+      if (context.signal.aborted) return { status: "unavailable" };
+      try {
+        const result = await track(context, metadata.resources(subject.subjectId, { page, perPage: 30, selection: binding.selection }));
+        resources.push(...result.resources);
+        if (!result.hasMore) break;
+      } catch (error) {
+        if (!(error instanceof MovieBoxError) || error.code !== "http" || error.status !== 400) throw error;
+        // Stop this listing; play-info still needs its own episode and media evidence.
+        resourceFailure = movieBoxFailure("resources", error);
+        break;
+      }
+    }
+    let episodeVerified = true;
+    if (binding.selection) {
+      context.stage = "episode";
+      const seasons = subject.seasons.length ? subject.seasons : await track(context, metadata.seasons(subject.subjectId));
+      episodeVerified = hasEpisodeEvidence(binding.selection, seasons, resources);
+      if (!episodeVerified && !resourceFailure) {
+        context.failure = { stage: "episode", code: "episode_evidence_missing" }; return { status: "unverified" };
+      }
+    }
+    context.stage = "play_info";
+    let playInfoFailure: DiscoveryFailure | undefined;
+    const streams = await track(context, metadata.playInfo(subject.subjectId, binding.selection)).catch((error) => {
+      playInfoFailure = movieBoxFailure("play_info", error); return [];
+    });
+    const selection = binding.selection;
+    if (selection && !episodeVerified && !hasEpisodeEvidence(selection, [], streams)) {
+      context.failure = playInfoFailure ?? { stage: "episode", code: "episode_evidence_missing" };
+      return { status: "unverified" };
+    }
+    const candidates = [
+      ...resources.filter((resource) => !selection || resource.se === selection.season && resource.ep === selection.episode),
+      ...streams.filter((resource) => !selection || resource.se === undefined && resource.ep === undefined || resource.se === selection.season && resource.ep === selection.episode),
+    ];
+    const videos: MediaResource[] = [];
+    const captions: MediaResource[] = [];
+    const seen = new Set<string>(); const heights = new Set<number>();
+    let adaptive = false; let unverified = false;
+    let adaptiveFailure: DiscoveryFailure | undefined;
+    let probeFailure: DiscoveryFailure | undefined;
+    let streamFailure: DiscoveryFailure | undefined;
+    let formatFailure: DiscoveryFailure | undefined;
+    const streamPriority = ["codec_missing", "codec_unsupported", "height_missing", "format", "missing_url", "unknown"] as const;
+    // Status precedence is unchanged. Prefer attempted probes to skipped streams,
+    // concrete probe evidence to generic rejection, then first observed within a category.
+    context.stage = "stream";
+    for (const candidate of candidates.slice(0, 8)) {
+      if (context.signal.aborted) return { status: "unavailable" };
+      const classification = classifyStream(candidate);
+      if (classification.status === "unsupported_adaptive") {
+        adaptive = true; adaptiveFailure ??= { stage: "stream", code: classification.reason }; continue;
+      }
+      if (classification.status === "unsupported_format") {
+        formatFailure ??= { stage: "stream", code: classification.reason }; continue;
+      }
+      const code = !candidate.url ? "missing_url" :
+        seen.has(candidate.url) ? "unknown" : candidate.format && !["mp4", "video/mp4"].includes(candidate.format.toLowerCase()) ? "format" :
+        !candidate.codec ? "codec_missing" : !/^(?:h\.?264|avc|avc1|hev(?:c|1)|hvc|hevc)(?:[ ._-]|$)/i.test(candidate.codec) ? "codec_unsupported" :
+        !candidate.height ? "height_missing" : heights.has(candidate.height) ? "unknown" : undefined;
+      if (code) {
+        unverified = true;
+        if (!streamFailure || streamPriority.findIndex((entry) => entry === code) < streamPriority.findIndex((entry) => entry === streamFailure!.code)) {
+          streamFailure = { stage: "stream", code };
+        }
+        continue;
+      }
+      if (candidate.expiresAt !== undefined && candidate.expiresAt - 60000 <= now() + 30000) {
+        formatFailure ??= { stage: "stream", code: "expired" }; continue;
+      }
+      // Attach authorization credentials (signCookie/policy/cookie) as request headers
+      // so the transport probe can verify the CDN-backed stream end-to-end.
+      const headers: Record<string, string> = { ...candidate.headers };
+      if (candidate.signCookie !== undefined) headers.cookie = candidate.signCookie;
+      if (candidate.cookie !== undefined && candidate.signCookie === undefined) headers.cookie = candidate.cookie;
+      const resource: MediaResource = {
+        url: candidate.url!, kind: "video", headers, height: candidate.height,
+        codec: candidate.codec, resourceId: candidate.resourceId, expiresAt: candidate.expiresAt,
+      };
+      context.stage = "media_probe";
+      const probe = async (signal: AbortSignal): Promise<MediaProbeEvidence> => {
+        try {
+          return await (options.transport.probeEvidence
+            ? options.transport.probeEvidence(resource, signal)
+            : options.transport.probe(resource, signal).then((playable) => ({ playable, representation: undefined })));
+        } catch (error) {
+          context.failure = projectDiscoveryFailure({ stage: "media_probe",
+            code: error instanceof TransportError && mediaProbeFailureCodes.includes(error.code) ? error.code : "unknown" });
+          throw error;
+        }
+      };
+      const evidence = videos.length || optional
+        ? await budget(context, 500, probe)
+        : await track(context, probe(context.signal));
+      if (!evidence?.playable || context.signal.aborted) {
+        unverified = true;
+        const failure = evidence?.failure;
+        const rejected: DiscoveryFailure = failure && mediaProbeFailureCodes.includes(failure.code)
+          ? projectDiscoveryFailure({ stage: "media_probe", code: failure.code, httpStatus: failure.httpStatus }) ?? { stage: "media_probe", code: "probe_rejected" }
+          : { stage: "media_probe", code: "probe_rejected" };
+        if (!probeFailure || ["unknown", "probe_rejected"].includes(probeFailure.code) && !["unknown", "probe_rejected"].includes(rejected.code)) {
+          probeFailure = rejected;
+        }
+        continue;
+      }
+      // Only typed strong-validator evidence may bind relay representations.
+      if (isMediaRepresentation(evidence.representation)) {
+        resource.representation = { ...evidence.representation };
+      }
+      seen.add(candidate.url!); heights.add(candidate.height!); videos.push(resource);
+    }
+    if (!videos.length) {
+      context.failure = adaptive ? adaptiveFailure : unverified ? probeFailure ?? streamFailure :
+        formatFailure ?? playInfoFailure ?? resourceFailure ?? { stage: "stream", code: "no_candidates" };
+      return { status: adaptive ? "unsupported_adaptive" : unverified ? "unverified" : "unsupported_format" };
+    }
+    videos.sort((a, b) => b.height! - a.height!);
+    const captionVideo = videos.find((video) => video.resourceId);
+    if (captionVideo?.resourceId) {
+      await budget(context, 500, async (signal) => {
+        const metadata = options.metadata(signal);
+        const listed = await track(context, metadata.captions(subject.subjectId, captionVideo.resourceId!));
+        const urls = new Set<string>(); const languages = new Set<string>();
+        for (const caption of listed.slice(0, 8)) {
+          if (signal.aborted) break;
+          const format = caption.format?.toLowerCase() ?? new URL(caption.url).pathname.split(".").pop()?.toLowerCase();
+          if (caption.requiresVerification || caption.resourceId !== undefined && caption.resourceId !== captionVideo.resourceId ||
+              format !== "srt" && format !== "vtt" || !safeLanguage(caption.lang) || !safeLabel(caption.label) ||
+              urls.has(caption.url) || languages.has(caption.lang.toLowerCase()) ||
+              caption.expiresAt !== undefined && caption.expiresAt - 60000 <= now() + 30000) continue;
+          const resource: MediaResource = { kind: "subtitle", url: caption.url, headers: { ...caption.headers },
+            lang: caption.lang, label: caption.label, captionFormat: format, expiresAt: caption.expiresAt, resourceId: caption.resourceId };
+          try {
+            await track(context, options.transport.caption(resource, signal));
+            if (signal.aborted) break;
+            captions.push(resource); urls.add(caption.url); languages.add(caption.lang.toLowerCase());
+          } catch { /* Optional captions never discard verified video. */ }
+        }
+      });
+    }
+    return { status: "ready", audio: { subjectId: subject.subjectId, label, lang, videos, captions } };
+  };
+  const relationshipMatches = (dub: DubMetadata, target: TitleIdentity) => identityMatches(dub, target);
+  const discover = async (type: MediaType, id: string, params: ResolveParams, context: WorkContext, bound?: PlaybackBinding): Promise<DiscoveryResult> => {
+    const metadata = options.metadata(context.signal);
     const mappingKey = `${type}:${id}`;
-    let subject = mappings.get(mappingKey)?.subject;
-    if (!subject) {
-      const target = await options.lookup(type, id, signal);
-      if (!target) return { status: "unverified" };
-      const matched = await matchMovieBoxSubject(metadata, target);
+    let entry = !bound ? mappings.get(mappingKey) : undefined;
+    let target = bound?.target ?? entry?.binding.target;
+    let subject = entry?.subject;
+    if (bound) {
+      context.stage = "detail";
+      subject = await track(context, metadata.detail(bound.subjectId));
+      if (!subject || subject.subjectId !== bound.subjectId || !identityMatches(subject, bound.target)) {
+        context.failure = { stage: "detail", code: !subject ? "detail_missing" : "detail_mismatch" }; return { status: "unverified" };
+      }
+    } else if (!subject) {
+      context.stage = "tmdb";
+      target = await track(context, options.lookup(type, id, context.signal));
+      if (!target) { context.failure = { stage: "tmdb", code: "no_target" }; return { status: "unverified" }; }
+      context.stage = "matching";
+      const matched = await track(context, matchMovieBoxSubject(metadata, target, (failure) => { context.failure = failure; }));
       if (matched.status !== "matched") return matched;
       subject = matched.subject;
-      if (signal.aborted) return { status: "unavailable" };
-      prune();
-      mappings.set(mappingKey, { subject, expiresAt: now() + 30 * 60 * 1000 });
     }
-    const selection = type === "tv" ? { season: params.season ?? 1, episode: params.episode ?? 1 } : undefined;
-    const resources: PrivateStreamMetadata[] = [];
-    for (let page = 1; page <= 2; page++) {
-      if (signal.aborted) return { status: "unavailable" };
-      const result = await metadata.resources(subject.subjectId, { page, perPage: 30, selection });
-      resources.push(...result.resources);
-      if (!result.hasMore) break;
+    if (!target || !subject || context.signal.aborted) return { status: "unavailable" };
+    const binding: PlaybackBinding = { type, tmdbId: id, target: structuredClone(target), subjectId: subject.subjectId,
+      selection: type === "tv" ? { season: params.season ?? 1, episode: params.episode ?? 1 } : undefined };
+    if (!bound) {
+      mappings.set(mappingKey, { binding, subject: structuredClone(subject), expiresAt: now() + 1800000 }); prune();
     }
-    let episodeVerified = !selection;
-    if (selection) {
-      const seasons = subject.seasons.length ? subject.seasons : await metadata.seasons(subject.subjectId);
-      episodeVerified = hasEpisodeEvidence(selection, seasons, resources);
+    const canonical = await loadAudio(binding, subject, context, "Source audio", "und");
+    if (!canonical.audio) return { status: canonical.status };
+    const audios = [canonical.audio];
+    const optionalDeadline = Math.min(context.deadline, performance.now() + 2000);
+    const grouped = new Map<string, DubMetadata[]>();
+    for (const dub of subject.dubs) { const rows = grouped.get(dub.subjectId) ?? []; rows.push(dub); grouped.set(dub.subjectId, rows); }
+    let attempted = 0;
+    for (const [subjectId, rows] of grouped) {
+      if (subjectId === subject.subjectId) continue;
+      const dub = rows[0]!;
+      if (rows.some((row) => JSON.stringify(row) !== JSON.stringify(dub)) || !relationshipMatches(dub, target) ||
+          !safeLanguage(dub.lang) || !safeLabel(dub.label)) continue;
+      if (attempted++ >= 2 || performance.now() >= optionalDeadline || context.signal.aborted) break;
+      const audio = await budget(context, Math.min(1000, optionalDeadline - performance.now()), async (signal) => {
+        const alternateContext: WorkContext = { ...context, signal, deadline: Math.min(optionalDeadline, performance.now() + 1000) };
+        const detail = await track(context, options.metadata(signal).detail(subjectId));
+        if (!detail || detail.subjectId !== subjectId || !identityMatches(detail, target!)) return undefined;
+        // The alternate's requested TV episode is proven independently inside loadAudio.
+        const verified = await loadAudio(binding, detail, alternateContext, dub.label!, dub.lang!, true);
+        return verified.audio;
+      });
+      if (audio && !context.signal.aborted) audios.push(audio);
     }
-    if (!episodeVerified) return { status: "unverified" };
-    const streams = await metadata.playInfo(subject.subjectId, selection).catch(() => []);
-    const candidates = [
-      ...resources.filter((resource) => !selection || (resource.se === selection.season && resource.ep === selection.episode)),
-      ...streams.filter((resource) => !selection || (resource.se === undefined && resource.ep === undefined) ||
-        (resource.se === selection.season && resource.ep === selection.episode)),
-    ];
-    const registered: string[] = [];
-    try {
-      const qualities: DirectQuality[] = [];
-      const subtitles: Subtitle[] = [];
-      const captionUrls = new Set<string>();
-      const captionLanguages = new Set<string>();
-      const seen = new Set<string>();
-      const seenHeights = new Set<number>();
-      let expiresAt = now() + 5 * 60 * 1000;
-      let adaptive = false;
-      let unverified = false;
-      for (const candidate of candidates.slice(0, 8)) {
-        if (signal.aborted) return { status: "unavailable" };
-        const classification = classifyStream(candidate);
-        if (classification.status === "unsupported_adaptive") { adaptive = true; continue; }
-        if (classification.status === "unsupported_format") continue;
-        if (candidate.requiresVerification || !candidate.url || seen.has(candidate.url)) { unverified = true; continue; }
-        // Unknown formats/codec metadata are not proof of a browser-compatible MP4.
-        if (candidate.format && !["mp4", "video/mp4"].includes(candidate.format.toLowerCase())) { unverified = true; continue; }
-        if (!candidate.codec || !/^(?:h\.?264|avc|avc1)(?:[ ._-]|$)/i.test(candidate.codec)) { unverified = true; continue; }
-        const height = candidate.height;
-        if (!height || seenHeights.has(height)) { unverified = true; continue; }
-        const resource: MediaResource = {
-          url: candidate.url, kind: "video", headers: candidate.headers,
-          height, codec: candidate.codec, resourceId: candidate.resourceId, expiresAt: candidate.expiresAt,
-        };
-        let probed = false;
-        if (qualities.length) {
-          if (performance.now() >= workDeadline) break;
-          const probeController = new AbortController();
-          const probeSignal = AbortSignal.any([signal, probeController.signal]);
-          let probeTimer: ReturnType<typeof setTimeout> | undefined;
-          const probeTimeout = new Promise<boolean>((resolve) => {
-            probeTimer = setTimeout(() => { probeController.abort(); resolve(false); }, Math.min(500, workDeadline - performance.now()));
-          });
-          try { probed = await Promise.race([options.transport.probe(resource, probeSignal).catch(() => false), probeTimeout]); }
-          finally { clearTimeout(probeTimer); probeController.abort(); }
-        } else {
-          probed = await options.transport.probe(resource, signal);
-        }
-        if (!probed) { unverified = true; continue; }
-        const resourceExpiry = candidate.expiresAt ? Math.min(expiresAt, candidate.expiresAt - 60000) : expiresAt;
-        if (resourceExpiry <= now() + 30000) continue;
-        expiresAt = resourceExpiry;
-        seen.add(candidate.url);
-        seenHeights.add(height);
-        // Register after probing, and only expose the opaque capability path.
-        const token = options.registry.register(resource, expiresAt);
-        registered.push(token);
-        qualities.push({ id: opaqueId(), label: `${height}p`, height, url: `/media/${token}` });
-        if (candidate.resourceId && subtitles.length === 0 && performance.now() < workDeadline) {
-          const captionController = new AbortController();
-          const captionSignal = AbortSignal.any([signal, captionController.signal]);
-          const captionMetadata = options.metadata(captionSignal);
-          const captionBudget = Math.min(500, workDeadline - performance.now());
-          let captionTimer: ReturnType<typeof setTimeout> | undefined;
-          const captionTimeout = new Promise<never>((_resolve, reject) => {
-            captionTimer = setTimeout(() => { captionController.abort(); reject(new Error("Caption unavailable")); }, captionBudget);
-          });
-          try {
-            const captions = await Promise.race([captionMetadata.captions(subject.subjectId, candidate.resourceId), captionTimeout]).catch(() => []);
-            for (const caption of captions.slice(0, 8)) {
-              const format = caption.format?.toLowerCase() ?? new URL(caption.url).pathname.split(".").pop()?.toLowerCase();
-              if (caption.requiresVerification || (format !== "srt" && format !== "vtt") ||
-                  !caption.lang || !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(caption.lang) ||
-                  caption.lang.length > 35 || !caption.label || caption.label.length > 120 ||
-                  /[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]/u.test(caption.label) ||
-                  captionUrls.has(caption.url) || captionLanguages.has(caption.lang.toLowerCase())) continue;
-              const descriptor: MediaResource = {
-                kind: "subtitle", url: caption.url, headers: caption.headers, captionFormat: format,
-                lang: caption.lang, label: caption.label,
-              };
-              try {
-                await Promise.race([options.transport.caption(descriptor, captionSignal), captionTimeout]);
-                if (captionSignal.aborted) break;
-                const captionToken = options.registry.register(descriptor, expiresAt);
-                registered.push(captionToken);
-                captionUrls.add(caption.url);
-                captionLanguages.add(caption.lang.toLowerCase());
-                subtitles.push({ id: opaqueId(), lang: caption.lang, label: caption.label, url: `/media/${captionToken}` });
-              } catch { /* An unavailable caption must not discard a verified video. */ }
-            }
-          } finally {
-            clearTimeout(captionTimer);
-            captionController.abort();
-          }
-        }
-      }
-      if (signal.aborted) return { status: "unavailable" };
-      if (!qualities.length) return { status: adaptive ? "unsupported_adaptive" : unverified ? "unverified" : "unsupported_format" };
-      const audioId = opaqueId();
-      const source: DirectSource = {
-        type: "direct", provider: "moviebox", label: "MovieBox", format: "progressive",
-        sessionId: opaqueId(), expiresAt, renewAt: expiresAt - 30000,
-        qualities: qualities.sort((a, b) => (b.height ?? 0) - (a.height ?? 0)), subtitles,
-        // Alternate dub subjects are not exposed until their relationship/resources are verified.
-        audios: [{ id: audioId, label: "Source audio", lang: "und" }], selectedAudio: audioId,
-      };
-      registered.length = 0;
-      return { status: "ready", source };
-    } finally {
-      for (const token of registered) options.registry.revoke(token);
-    }
+    if (context.signal.aborted) return { status: "unavailable" };
+    const deadlines = audios.flatMap((audio) => [...audio.videos, ...audio.captions]).flatMap((resource) => resource.expiresAt === undefined ? [] : [resource.expiresAt - 60000]);
+    const expiresAt = Math.min(now() + 300000, ...deadlines);
+    return { status: "ready", discovery: { binding, audios, expiresAt } };
   };
-
-  return async (type, id, params, signal) => {
+  const privateWork = (type: MediaType, id: string, params: ResolveParams, bound?: PlaybackBinding): Promise<DiscoveryResult> => {
     prune();
-    if (signal?.aborted) return { status: "unavailable" };
-    const key = `${type}:${id}:${type === "tv" ? `${params.season ?? 1}:${params.episode ?? 1}` : "movie"}`;
-    const cached = results.get(key);
-    if (cached) {
-      const source = cached.result.source;
-      const valid = !source || [...source.qualities, ...source.subtitles].every((resource) =>
-        options.registry.resolve(resource.url.slice("/media/".length), "GET") !== undefined);
-      if (valid) return cached.result;
-      results.delete(key);
+    const key = `${type}:${id}:${type === "tv" ? `${params.season ?? 1}:${params.episode ?? 1}` : "movie"}:${bound ? `refresh:${bound.subjectId}` : "discovery"}`;
+    const cached = !bound ? results.get(key) : undefined;
+    if (cached) return Promise.resolve(cached.result);
+    const existing = flights.get(key);
+    if (existing) return existing.settled ? Promise.resolve({ status: "unavailable" }) : existing.result;
+    if (flights.size >= 4) {
+      emitMovieBoxDiagnostic(options.diagnostic, { status: "unavailable", stage: "discovery", code: "busy" });
+      return Promise.resolve({ status: "unavailable" });
     }
-    let flight = flights.get(key);
-    if (!flight) {
-      if (flights.size >= 4) return { status: "unavailable" };
-      const controller = new AbortController();
-      let timer: ReturnType<typeof setTimeout>;
-      const timeout = new Promise<MovieBoxResolution>((resolve) => {
-        timer = setTimeout(() => { controller.abort(); resolve({ status: "unavailable" }); }, 12000);
-      });
-      const running = work(type, id, params, controller.signal).catch((): MovieBoxResolution => ({ status: "unavailable" }));
-      const combined = Promise.race([running, timeout]).then((result) => {
-        prune();
-        results.set(key, { result, expiresAt: result.source ? result.source.renewAt : now() + 15000 });
-        return result;
-      });
-      flight = combined;
-      flights.set(key, combined);
-      void running.finally(() => { clearTimeout(timer); flights.delete(key); });
-    }
-    if (!signal) return flight;
-    return new Promise<MovieBoxResolution>((resolve) => {
-      const abort = () => resolve({ status: "unavailable" });
-      signal.addEventListener("abort", abort, { once: true });
-      if (signal.aborted) abort();
-      void flight.then(resolve).finally(() => signal.removeEventListener("abort", abort));
+    const controller = new AbortController();
+    const context: WorkContext = { signal: controller.signal, deadline: performance.now() + 12000, tasks: new Set(), stage: "discovery" };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<DiscoveryResult>((resolve) => { timer = setTimeout(() => {
+      context.failure = { stage: "discovery", code: "timeout" }; controller.abort(); resolve({ status: "unavailable" });
+    }, 12000); });
+    const running = discover(type, id, params, context, bound).catch((error): DiscoveryResult => {
+      context.failure ??= movieBoxFailure(context.stage, error); return { status: "unavailable" };
     });
+    const result = Promise.race([running, timeout]).then((result) => {
+      if (result.status !== "ready" && result.status !== "blocked_setup") {
+        emitMovieBoxDiagnostic(options.diagnostic, { status: result.status, ...context.failure ?? { stage: context.stage, code: "unknown" } });
+      }
+      if (!bound && !controller.signal.aborted) {
+        results.set(key, { result: structuredClone(result), expiresAt: Math.min(now() + 15000, result.discovery ? result.discovery.expiresAt - 30000 : Infinity) }); prune();
+      }
+      return result;
+    });
+    const slot = { result, settled: false };
+    flights.set(key, slot);
+    void result.then(() => { slot.settled = true; });
+    // Retain all admission slots until even aborted/non-cooperative optional subwork settles.
+    void running.finally(async () => {
+      clearTimeout(timer);
+      while (context.tasks.size) await Promise.allSettled([...context.tasks]);
+      if (flights.get(key) === slot) flights.delete(key);
+    }).catch(() => undefined);
+    return result;
   };
+  const playback = createPlaybackSessions({ registry: options.registry, now,
+    refresh: async (binding, signal) => {
+      const result = await awaitCaller(privateWork(binding.type, binding.tmdbId, binding.selection ?? {}, binding), signal);
+      return result.discovery;
+    },
+  });
+  const resolve: MovieBoxResolver = async (type, id, params, signal): Promise<MovieBoxResolution> => {
+    if (signal?.aborted) return { status: "unavailable" };
+    const result = await awaitCaller(privateWork(type, id, params), signal);
+    if (!result.discovery || signal?.aborted) return { status: result.status };
+    try { return { status: "ready", source: playback.issue(result.discovery, signal) }; }
+    catch {
+      emitMovieBoxDiagnostic(options.diagnostic, { status: "unavailable", stage: "session", code: "unknown" });
+      return { status: "unavailable" };
+    }
+  };
+  return Object.assign(resolve, { playback });
+}
+
+/** Caller cancellation cannot cancel shared private discovery or issue a public session. */
+function awaitCaller(work: Promise<DiscoveryResult>, signal?: AbortSignal): Promise<DiscoveryResult> {
+  if (!signal) return work;
+  if (signal.aborted) return Promise.resolve({ status: "unavailable" });
+  return new Promise((resolve) => {
+    const abort = () => resolve({ status: "unavailable" });
+    signal.addEventListener("abort", abort, { once: true });
+    void work.then(resolve).finally(() => signal.removeEventListener("abort", abort));
+  });
 }

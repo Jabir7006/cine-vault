@@ -1,4 +1,4 @@
-import type { DirectAudio, DirectQuality, DirectSource, Source, SourcesResponse, Subtitle } from "./types";
+import type { DirectAudio, DirectQuality, DirectSource, MovieBoxSetupReason, Source, SourcesResponse, Subtitle } from "./types";
 
 const MAX_SESSION_WINDOW_MS = 10 * 60_000;
 const statuses = new Set<SourcesResponse["moviebox"]["status"]>([
@@ -100,13 +100,16 @@ const parseDirect = (item: Record<string, unknown>): DirectSource => {
   if (item.provider !== "moviebox" || item.format !== "progressive") return invalid();
   const expiresAt = timestamp(item.expiresAt);
   const renewAt = timestamp(item.renewAt);
-  // Deterministic parsing deliberately does not consult the local clock. The
-  // player handles already-expired responses. No issuedAt exists in v1, so the
-  // bounded interval checked here is the renewal window, not proof of issue time.
-  if (renewAt >= expiresAt || expiresAt - renewAt > MAX_SESSION_WINDOW_MS) return invalid();
-  const qualities = list(item.qualities, 16, 1, parseQuality);
-  const subtitles = list(item.subtitles, 32, 0, parseSubtitle);
-  const audios = list(item.audios, 16, 1, parseAudio);
+  const issuedAt = timestamp(item.issuedAt);
+  const controlExpiresAt = timestamp(item.controlExpiresAt);
+  // Parsing is deterministic; expired capabilities are rejected by the player.
+  if (issuedAt > renewAt || renewAt >= expiresAt || expiresAt - issuedAt > MAX_SESSION_WINDOW_MS ||
+      controlExpiresAt <= issuedAt || controlExpiresAt > expiresAt + 30_000) return invalid();
+  if (typeof item.revision !== "number" || !Number.isSafeInteger(item.revision) || item.revision < 1) return invalid();
+  if (typeof item.controlToken !== "string" || !/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(item.controlToken)) return invalid();
+  const qualities = list(item.qualities, 8, 1, parseQuality);
+  const subtitles = list(item.subtitles, 8, 0, parseSubtitle);
+  const audios = list(item.audios, 8, 1, parseAudio);
   unique(qualities, (quality) => quality.id);
   unique(qualities, (quality) => quality.url);
   unique(qualities, (quality) => quality.label.toLowerCase());
@@ -117,7 +120,8 @@ const parseDirect = (item: Record<string, unknown>): DirectSource => {
   if (!audios.some((audio) => audio.id === selectedAudio)) return invalid();
   return {
     type: "direct", provider: "moviebox", format: "progressive", label: text(item.label),
-    sessionId: id(item.sessionId), expiresAt, renewAt, qualities, subtitles, audios, selectedAudio,
+    sessionId: id(item.sessionId), issuedAt, revision: item.revision, controlToken: item.controlToken,
+    controlExpiresAt, expiresAt, renewAt, qualities, subtitles, audios, selectedAudio,
   };
 };
 
@@ -129,14 +133,32 @@ const parseSource = (value: unknown): Source => {
   return { type: "embed", provider: item.provider, label: text(item.label), embedUrl: embedUrl(item.embedUrl) };
 };
 
-/** Validate unknown JSON and return only the public v1 playback contract. */
+/** Validate unknown JSON and project only the public v2 playback contract. */
+export const parseDirectSource = (value: unknown): DirectSource => {
+  const item = record(value);
+  if (item.type !== "direct") return invalid();
+  return parseDirect(item);
+};
+
 export const parseSourcesResponse = (value: unknown): SourcesResponse => {
   const response = record(value);
   const moviebox = record(response.moviebox);
-  if (response.version !== 1 || typeof moviebox.status !== "string" ||
+  if (response.version !== 2 || typeof moviebox.status !== "string" ||
       !statuses.has(moviebox.status as SourcesResponse["moviebox"]["status"])) return invalid();
+  const reasons = new Set<MovieBoxSetupReason>([
+    "missing_signing_key", "invalid_signing_key", "missing_tmdb_token",
+    "missing_media_hosts", "invalid_relay_key", "invalid_configuration",
+  ]);
+  if (Object.hasOwn(moviebox, "reason") && (moviebox.status !== "blocked_setup" ||
+      typeof moviebox.reason !== "string" || !reasons.has(moviebox.reason as MovieBoxSetupReason))) return invalid();
   const sources = list(response.sources, 16, 0, parseSource);
   unique(sources, (source) => source.provider);
   if (sources.some((source) => source.type === "direct") !== (moviebox.status === "ready")) return invalid();
-  return { version: 1, sources, moviebox: { status: moviebox.status as SourcesResponse["moviebox"]["status"] } };
+  return {
+    version: 2, sources,
+    moviebox: {
+      status: moviebox.status as SourcesResponse["moviebox"]["status"],
+      ...(Object.hasOwn(moviebox, "reason") ? { reason: moviebox.reason as MovieBoxSetupReason } : {}),
+    },
+  };
 };

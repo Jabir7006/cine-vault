@@ -13,7 +13,7 @@ async function main(): Promise<void> {
     process.env.DOTENV_CONFIG_QUIET = "true";
     const { config } = await import("../src/config.js");
     client = new MovieBoxClient({ movieboxSecretHex: config.movieboxSecretHex });
-    await client.init();
+    // Search itself initializes the anonymous visitor session; no manual login/init.
     await client.search("Inception");
     await client.search("Inception");
     console.log(JSON.stringify({ status: "ok", ...client.diagnostics() }));

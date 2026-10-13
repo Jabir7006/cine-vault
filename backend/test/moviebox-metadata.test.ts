@@ -69,11 +69,14 @@ test("play info retains actual bounded metadata only and never invents url or qu
     signCookie: "opaque-not-a-destination" }] });
   assert.equal(streams[0]!.resourceId, "11");
   assert.equal(streams[0]!.url, undefined);
-  assert.equal(streams[0]!.height, undefined);
+  assert.equal(streams[0]!.height, 720); // Derived from max resolutions when height/resolution absent.
   assert.equal(streams[0]!.codec, "h264");
   assert.deepEqual(streams[0]!.resolutions, [480, 720]);
   assert.equal(streams[0]!.requiresVerification, true);
   assert.deepEqual(classifyStream(streams[0]!), { status: "unverified", reason: "signed_policy" });
+  // Comma-separated string resolutions are parsed into numeric arrays (API variant).
+  const stringRes = parsePlayInfo({ streams: [{ url: cdn, codecName: "h264", resolutions: "1080,720,480" }] })[0]!;
+  assert.deepEqual(stringRes.resolutions, [1080, 720, 480]);
   assert.deepEqual(parsePlayInfo({ streams: [] }), []);
 });
 test("resources preserve sparse explicit se/ep and resourceLink plus file fields", () => {
@@ -148,7 +151,7 @@ test("notice/deprecation paths are rejected; extension/MP4 labels alone are neve
   assert.deepEqual(classifyStream({ url: cdn, format: "MKV", requiresVerification: false }), { status: "unsupported_format", reason: "format" });
 });
 test("unknown values and numeric media metadata stay bounded without unsafe coercion", () => {
-  const parsed = parsePlayInfo({ streams: [{ url: cdn, height: 9000, size: 2 ** 53, expiresAt: -1, quality: "x".repeat(65), codec: "x".repeat(129) }] })[0]!;
+  const parsed = parsePlayInfo({ streams: [{ url: cdn, height: 9000, size: 2 ** 53, quality: "x".repeat(65), codec: "x".repeat(129) }] })[0]!;
   assert.equal(parsed.height, undefined);
   assert.equal(parsed.size, undefined);
   assert.equal(parsed.expiresAt, undefined);
@@ -187,6 +190,15 @@ test("narrow injected adapter paths, string precision, TV exact pairs and single
     `/wefeed-mobile-bff/subject-api/get-ext-captions?subjectId=7&resourceId=${subject.subjectId}`,
   ]);
 });
+test("explicit malformed stream/caption expiry is dropped rather than treated as absent", () => {
+  for (const expiresAt of [null, undefined, -1, 0, NaN, Infinity, "bad", "1e3", 2 ** 53]) {
+    assert.deepEqual(parsePlayInfo({ streams: [{ url: cdn, expiresAt }] }), []);
+    assert.deepEqual(parseCaptions({ extCaptions: [{ url: cdn, expiresAt }] }), []);
+  }
+  assert.equal(parsePlayInfo({ streams: [{ url: cdn }] }).length, 1);
+  assert.equal(parseCaptions({ extCaptions: [{ url: cdn, expiresAt: 1800000000000 }] })[0]!.expiresAt, 1800000000000);
+});
+
 test("invalid request values reject before transport and injected errors propagate safely", async () => {
   let calls = 0;
   const metadata = new MovieBoxMetadata({ get: async () => { calls++; return {}; }, search: async () => { calls++; return {}; } });

@@ -177,6 +177,65 @@ test("server-owned descriptors and headers are defensive immutable copies", () =
   assert.throws(() => { (owned.headers as Record<string, string>).Cookie = "changed"; }, TypeError);
 });
 
+test("representation evidence is validated, copied, frozen and never embedded in capabilities", () => {
+  const { registry } = fixture();
+  const input = resource({ representation: { etag: '"private-version"', length: 24 } });
+  const token = registry.register(input, NOW + 120_000);
+  input.representation!.etag = '"changed"';
+  input.representation!.length = 48;
+  const owned = registry.resolve(token, "GET")!;
+  assert.deepEqual(owned.representation, { etag: '"private-version"', length: 24 });
+  assert.notEqual(owned.representation, input.representation);
+  assert.equal(Object.isFrozen(owned.representation), true);
+  assert.ok(!token.includes("private-version"));
+  for (const representation of [null, {}, { etag: 'W/"version"', length: 24 },
+    { etag: "unquoted", length: 24 }, { etag: '"line\r\nbreak"', length: 24 },
+    { etag: '"a" "b"', length: 24 }, { etag: `"${"x".repeat(1024)}"`, length: 24 },
+    { etag: '"version"', length: 0 }, { etag: '"version"', length: -1 },
+    { etag: '"version"', length: 1.5 }, { etag: '"version"', length: Number.MAX_SAFE_INTEGER + 1 },
+    { etag: '"version"', length: "24" }]) {
+    assert.throws(() => registry.register(resource({ representation } as unknown as Partial<MediaResource>), NOW + 120_000));
+  }
+  assert.throws(() => registry.register(resource({ kind: "subtitle", representation: { etag: '"video"', length: 24 } }), NOW + 120_000));
+});
+
+test("atomic batches share actual TTL/upstream-clipped expiry and never evict live capabilities", () => {
+  const { registry } = fixture({ capacity: 3, ttlMs: 120_000 });
+  const old = registry.register(resource({ label: "committed" }), NOW + 120_000);
+  const batch = registry.registerBatch([resource(), resource({ expiresAt: NOW + 90_000 })], NOW + 999_000);
+  assert.equal(batch.expiresAt, NOW + 30_000);
+  assert.equal(batch.tokens.length, 2);
+  for (const token of batch.tokens) assert.equal(registry.expiresAt(token), batch.expiresAt);
+  assert.ok(registry.resolve(old, "GET"));
+  assert.throws(() => registry.registerBatch([resource()], NOW + 120_000));
+  assert.ok(registry.resolve(old, "GET"));
+  for (const token of batch.tokens) assert.ok(registry.resolve(token, "GET"));
+});
+
+test("invalid/expired batches roll back completely without consuming admission capacity", () => {
+  const { registry } = fixture({ capacity: 2 });
+  for (const resources of [[], [resource(), resource({ representation: { etag: "invalid", length: 24 } })],
+    [resource(), resource({ expiresAt: NOW + 60_000 })]]) {
+    assert.throws(() => registry.registerBatch(resources, NOW + 120_000));
+  }
+  const batch = registry.registerBatch([resource(), resource()], NOW + 120_000);
+  assert.equal(batch.tokens.length, 2);
+  for (const token of batch.tokens) registry.revoke(token);
+  assert.equal(registry.registerBatch([resource(), resource()], NOW + 120_000).tokens.length, 2);
+});
+
+test("batch admission prunes expired entries without evicting valid playback", () => {
+  const { registry, setNow } = fixture({ capacity: 2 });
+  const expired = registry.register(resource(), NOW + 1_000);
+  const live = registry.register(resource(), NOW + 120_000);
+  assert.throws(() => registry.registerBatch([resource()], NOW + 120_000));
+  setNow(NOW + 1_000);
+  const batch = registry.registerBatch([resource()], NOW + 120_000);
+  assert.equal(registry.resolve(expired, "GET"), undefined);
+  assert.ok(registry.resolve(live, "GET"));
+  assert.ok(registry.resolve(batch.tokens[0]!, "GET"));
+});
+
 test("descriptors reject unsafe URL shape, unsupported kinds and malformed metadata", () => {
   const { registry } = fixture();
   for (const url of ["http://media.example.test/x", "file:///x", "//media.example.test/x", "https://user:pass@media.example.test/x",

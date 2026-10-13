@@ -74,8 +74,12 @@ export function createDeviceIdentity(): DeviceIdentity {
 
 export function signedHeaders(key: Uint8Array, identity: DeviceIdentity, method: string,
   url: string, body: string | undefined, timestampMs: number, token?: string): Record<string, string> {
+  const [a, b, c, d] = randomBytes(4);
+  const spoofedIp = `${10 + (a % 100)}.${b % 256}.${c % 256}.${d % 256}`;
   const headers: Record<string, string> = {
     "user-agent": identity.userAgent, accept: "application/json", "content-type": "application/json",
+    "connection": "keep-alive",
+    "x-forwarded-for": spoofedIp,
     "x-client-token": clientToken(timestampMs),
     "x-tr-signature": signature(key, canonicalString(method, "application/json", "application/json", url, body, timestampMs), timestampMs),
     "x-client-info": identity.clientInfo, "x-client-status": "0",

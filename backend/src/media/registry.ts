@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { isMediaRepresentation } from "./types.js";
 import type { MediaRegistry, MediaResource } from "./types.js";
 
 export const MAX_MEDIA_TTL_MS = 10 * 60_000;
@@ -71,6 +72,10 @@ function copyResource(resource: MediaResource): MediaResource {
     if (resource.captionFormat !== "srt" && resource.captionFormat !== "vtt") fail();
     copy.captionFormat = resource.captionFormat;
   }
+  if (resource.representation !== undefined) {
+    if (resource.kind !== "video" || !isMediaRepresentation(resource.representation)) fail();
+    copy.representation = Object.freeze({ etag: resource.representation.etag, length: resource.representation.length });
+  }
   return Object.freeze(copy);
 }
 
@@ -122,6 +127,34 @@ export class MemoryMediaRegistry implements MediaRegistry {
     const payload = `v1.${owned.kind}.GET-HEAD.${id}.${expiry}`;
     this.#entries.set(id, { resource: owned, expiresAt: expiry });
     return `${payload}.${this.#signature(payload).toString("base64url")}`;
+  }
+
+  registerBatch(resources: readonly MediaResource[], expiresAt: number): { tokens: string[]; expiresAt: number } {
+    // Validate every descriptor and generate every capability before touching live entries.
+    // A failed generation cannot evict or partially replace committed playback.
+    if (!Array.isArray(resources) || resources.length === 0 || resources.length > this.#capacity) fail();
+    const now = timestamp(this.#now());
+    const owned: MediaResource[] = [];
+    let expiry = Math.min(timestamp(expiresAt), now + this.#ttlMs);
+    for (const resource of resources) {
+      const copy = copyResource(resource);
+      owned.push(copy);
+      if (copy.expiresAt !== undefined) expiry = Math.min(expiry, copy.expiresAt - UPSTREAM_EXPIRY_MARGIN_MS);
+    }
+    if (!Number.isSafeInteger(expiry) || expiry <= now) fail();
+    this.#prune(now);
+    if (this.#entries.size + owned.length > this.#capacity) fail();
+    const staged = new Map<string, Entry>();
+    const tokens: string[] = [];
+    for (const resource of owned) {
+      let id: string;
+      do { id = randomBytes(24).toString("base64url"); } while (this.#entries.has(id) || staged.has(id));
+      const payload = `v1.${resource.kind}.GET-HEAD.${id}.${expiry}`;
+      tokens.push(`${payload}.${this.#signature(payload).toString("base64url")}`);
+      staged.set(id, { resource, expiresAt: expiry });
+    }
+    for (const [id, entry] of staged) this.#entries.set(id, entry);
+    return { tokens, expiresAt: expiry };
   }
 
   resolve(token: string, method: string): MediaResource | undefined {

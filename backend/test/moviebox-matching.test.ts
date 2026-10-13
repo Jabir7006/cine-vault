@@ -3,6 +3,7 @@ import test from "node:test";
 import { hasEpisodeEvidence, identityMatches, matchMovieBoxSubject, normalizeTitle, selectUniqueCandidate } from "../src/moviebox/matching.js";
 import type { MatchingMetadata, Target } from "../src/moviebox/matching.js";
 import type { SubjectDetail, SubjectIdentity } from "../src/moviebox/metadata.js";
+import { cleanMovieBoxTitle } from "../src/moviebox/metadata.js";
 import { MovieBoxError } from "../src/moviebox/errors.js";
 
 const target: Target = { type: "movie", titles: ["Film 2", "Original: Film 2"], year: 2024 };
@@ -24,6 +25,43 @@ test("Unicode NFKC/case/whitespace normalization preserves digits/punctuation an
   assert.notEqual(normalizeTitle("Amélie"), normalizeTitle("Amelie"));
   assert.notEqual(normalizeTitle("Spider-Man"), normalizeTitle("Spider Man"));
   assert.equal(normalizeTitle("বাংলা ২"), "বাংলা ২");
+});
+test("cleanMovieBoxTitle strips release tags, resolutions, language suffixes and season markers", () => {
+  assert.equal(cleanMovieBoxTitle("[Dub] Inception"), "Inception");
+  assert.equal(cleanMovieBoxTitle("[RAW] [1080p] Interstellar"), "Interstellar");
+  assert.equal(cleanMovieBoxTitle("Dune [2021]"), "Dune");
+  assert.equal(cleanMovieBoxTitle("Movie - Hindi Dub"), "Movie");
+  assert.equal(cleanMovieBoxTitle("Breaking Bad S01"), "Breaking Bad");
+  assert.equal(cleanMovieBoxTitle("Dark Season 2"), "Dark");
+  assert.equal(cleanMovieBoxTitle("Ek Deewane Ki Deewaniyat_360P"), "Ek Deewane Ki Deewaniyat");
+  assert.equal(cleanMovieBoxTitle("Inception (2010)"), "Inception (2010)");
+  assert.equal(cleanMovieBoxTitle("Movie (Director's Cut)"), "Movie");
+  assert.equal(cleanMovieBoxTitle("Movie - English Audio"), "Movie");
+  assert.equal(cleanMovieBoxTitle(""), "");
+  assert.equal(cleanMovieBoxTitle("   "), "");
+});
+test("search candidates with release tags match cleaned titles via selectUniqueCandidate", () => {
+  // MovieBox API returns raw titles like "[Dub] Film 2"; matchesTargetTitle (loose) cleans
+  // for initial filtering, but identityMatches (strict) requires exact title match — only
+  // the canonical "Film 2" subject enters the exact map, disambiguating from dubs/remakes.
+  const rawDub: SubjectIdentity = { subjectId: "2", title: "[Dub] Film 2", type: "movie", year: 2024 };
+  // Raw dub-only title fails strict identity but passes loose title matching.
+  assert.equal(selectUniqueCandidate([rawDub], target).status, "not_found");
+  // Canonical title passes both loose and strict → candidate.
+  assert.equal(selectUniqueCandidate([candidate, rawDub], target).status, "candidate");
+  // Two canonical titles, different IDs → ambiguous.
+  const canonical2: SubjectIdentity = { subjectId: "2", title: "Film 2", type: "movie", year: 2024 };
+  assert.equal(selectUniqueCandidate([candidate, canonical2], target).status, "ambiguous");
+  assert.equal(selectUniqueCandidate([{ ...canonical2, year: 2023 }], target).status, "not_found");
+});
+test("exact year matches are preferred over year-unknown candidates", () => {
+  // Candidates with year mismatch never pass identityMatches (year is part of strict identity).
+  const wrongYear: SubjectIdentity = { subjectId: "2", title: "Film 2", type: "movie", year: 2023 };
+  assert.equal(selectUniqueCandidate([wrongYear, { ...wrongYear, subjectId: "3" }], target).status, "not_found");
+  // Exact year match wins: candidate selected even when a year-undefined candidate is present.
+  assert.equal(selectUniqueCandidate([candidate, { ...candidate, subjectId: "2" }], target).status, "ambiguous");
+  // With one exact year match, a different title with wrong year doesn't cause ambiguity.
+  assert.equal(selectUniqueCandidate([candidate, wrongYear], target).status, "candidate");
 });
 test("canonical or original exact title, type and year all must agree", () => {
   assert.equal(identityMatches({ ...candidate, title: "  Ｆilm ２ " }, target), true);
@@ -94,6 +132,20 @@ test("transport failure propagates to caller fallback without relabeling it as n
   await assert.rejects(matchMovieBoxSubject({ search: async () => { throw failure; }, detail: async () => detail }, target), (error) => error === failure);
   await assert.rejects(matchMovieBoxSubject({ search: async () => [candidate], detail: async () => { throw failure; } }, target), (error) => error === failure);
 });
+test("matching failure callbacks preserve exact fixed stage and cannot alter propagation or gates", async () => {
+  const events: unknown[] = [];
+  const failure = new MovieBoxError("denied", 403);
+  await assert.rejects(matchMovieBoxSubject({ search: async () => [candidate], detail: async () => { throw failure; } }, target,
+    (event) => { events.push(event); }), (error) => error === failure);
+  assert.deepEqual(events.slice(), [{ stage: "detail", code: "denied", httpStatus: 403 }]);
+  await assert.rejects(matchMovieBoxSubject({ search: async () => { throw new Error("https://private.example/?token=private"); },
+    detail: async () => detail }, target, (event) => { events.push(event); }), Error);
+  assert.deepEqual(events[1], { stage: "matching", code: "unknown" });
+  const f = fixture([{ ...candidate, year: undefined }]);
+  assert.deepEqual(await matchMovieBoxSubject(f.metadata, target, () => { throw new Error("private logging error"); }), { status: "unverified" });
+  assert.equal(f.details.length, 0);
+});
+
 test("TV identity is not a movie match, and exact episode proof is a separate gate", async () => {
   const tv: SubjectDetail = { ...detail, type: "tv", seasons: [{ se: 2, episodeNumbers: [3, 9], maxEp: 20 }] };
   const tvTarget: Target = { ...target, type: "tv" };

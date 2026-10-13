@@ -1,13 +1,22 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLink, LoaderCircle, MonitorPlay, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { MediaType } from "@/features/details/types";
 import { watchSourcesOptions } from "../queries";
-import { playbackIdentity, resolveSource } from "../playback";
+import { playbackIdentity, resolveOwnedSource, resolveSource } from "../playback";
+import { movieBoxPresentation } from "../moviebox-status";
+import { sourcesWithEmbedFallback } from "../embed-fallback";
+import { discoveryFailureMessage } from "../discovery-error";
 import { EmbedPlayer } from "./EmbedPlayer";
 import { DirectPlayer } from "./DirectPlayer";
 import { SourceSelector } from "./SourceSelector";
+import type { DirectSource } from "../types";
+
+// Discovery identity is not an authorization capability. A module-local
+// monotonic owner works on HTTP/LAN contexts without secure-context crypto.
+let nextDiscoveryOwner = 0;
+const createDiscoveryOwner = () => `watch-owner-${++nextDiscoveryOwner}`;
 
 interface WatchPlayerProps {
   mediaType: MediaType;
@@ -18,33 +27,41 @@ interface WatchPlayerProps {
   episodeControls?: ReactNode;
 }
 
-export const WatchPlayer = ({
-  mediaType, mediaId, season, episode, title, episodeControls,
-}: WatchPlayerProps) => {
+export const WatchPlayer = (props: WatchPlayerProps) => {
   const [preferredProvider, setPreferredProvider] = useState<string>();
+  const identity = playbackIdentity(props.mediaType, props.mediaId, props.season, props.episode);
+  // Session ownership resets across episodes; provider preference does not.
+  return <OwnedWatchPlayer key={identity} {...props} preferredProvider={preferredProvider} onProviderPreference={setPreferredProvider} />;
+};
+
+const OwnedWatchPlayer = ({
+  mediaType, mediaId, season, episode, title, episodeControls, preferredProvider, onProviderPreference,
+}: WatchPlayerProps & { preferredProvider?: string; onProviderPreference: (provider: string) => void }) => {
   const [attempt, setAttempt] = useState(0);
+  const [discoveryOwner, setDiscoveryOwner] = useState(createDiscoveryOwner);
+  const [committed, setCommitted] = useState<DirectSource>();
   const unavailableId = useId();
   const query = useQuery({
-    ...watchSourcesOptions(mediaType, mediaId, season, episode),
+    ...watchSourcesOptions(mediaType, mediaId, season, episode, discoveryOwner),
     throwOnError: false,
   });
-  const sources = query.data?.sources ?? [];
-  const source = resolveSource(sources, preferredProvider);
+  const sources = sourcesWithEmbedFallback(query.data?.sources, query.isError, mediaType, mediaId, season, episode);
+  const candidate = resolveSource(sources, preferredProvider);
+  const source = resolveOwnedSource(sources, preferredProvider, committed);
+  const selectorSources = committed && !sources.some((item) => item.provider === committed.provider)
+    ? [committed, ...sources] : sources;
+  const hasEmbeds = selectorSources.some((item) => item.type === "embed");
+  const moviebox = movieBoxPresentation(query.data?.moviebox, selectorSources.some((item) => item.type === "direct"), query.isPending, hasEmbeds);
   const identity = playbackIdentity(mediaType, mediaId, season, episode);
-  const activeRefreshGeneration = useRef(0);
 
-  // A pending refresh owns only the committed playback instance that started
-  // it. Navigating away/back or switching provider invalidates its completion,
-  // even if the final identity happens to equal the original one again.
-  useLayoutEffect(() => {
-    activeRefreshGeneration.current += 1;
-    return () => { activeRefreshGeneration.current += 1; };
-  }, [identity, source?.provider, source?.type, preferredProvider, attempt]);
-
-  // Record the initial default too, so response reordering cannot change it.
-  if (preferredProvider === undefined && source) {
-    setPreferredProvider(source.provider);
-  }
+  // Capture direct ownership once; candidate removal/reordering/refetch cannot
+  // unmount the active session. Provider selection explicitly releases it.
+  if (!committed && candidate?.type === "direct") setCommitted(candidate);
+  useEffect(() => {
+    // Synthetic fallback must not claim the default preference: a manual retry
+    // can still choose a verified MovieBox source unless the viewer selected one.
+    if (preferredProvider === undefined && source && query.data && !query.isError) onProviderPreference(source.provider);
+  }, [preferredProvider, source, query.data, query.isError, onProviderPreference]);
 
   return (
     <section aria-label="Watch player" className="space-y-3">
@@ -60,15 +77,6 @@ export const WatchPlayer = ({
             key={`${identity}:${source.provider}:${attempt}`}
             source={source}
             title={title}
-            onRefresh={async () => {
-              const generation = activeRefreshGeneration.current;
-              const refreshed = await query.refetch();
-              if (generation !== activeRefreshGeneration.current || refreshed.isError) return false;
-              const refreshedSource = resolveSource(refreshed.data?.sources ?? [], preferredProvider);
-              if (refreshedSource?.type === "direct" && refreshedSource.renewAt <= Date.now()) return false;
-              setAttempt((value) => value + 1);
-              return true;
-            }}
           />
         ) : (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 text-center text-sm text-neutral-400" role="status">
@@ -89,11 +97,28 @@ export const WatchPlayer = ({
       </div>
 
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-neutral-950 p-2 sm:gap-3">
-        <SourceSelector sources={sources} selected={source?.provider} onSelect={(provider) => {
-          if (provider !== source?.provider) setPreferredProvider(provider);
+        <SourceSelector sources={selectorSources} selected={source?.provider} moviebox={moviebox} onSelect={(provider) => {
+          if (provider !== source?.provider) {
+            setCommitted(undefined);
+            onProviderPreference(provider);
+            // Switching local embed candidates does not need a new backend session.
+            if (committed) setDiscoveryOwner(createDiscoveryOwner());
+            setAttempt((value) => value + 1);
+          }
         }} />
         {episodeControls}
       </div>
+      {query.isError ? (
+        <div className="flex flex-wrap items-center gap-2 px-1 text-xs text-amber-300">
+          <p role="status">{discoveryFailureMessage(query.error, hasEmbeds)}</p>
+          <Button type="button" variant="outline" size="sm" className="min-h-11" disabled={query.isFetching} onClick={() => void query.refetch()}>
+            <RefreshCw aria-hidden="true" className="size-4" /> Retry discovery
+          </Button>
+        </div>
+      ) : null}
+      <p role="status" className={`px-1 text-xs ${moviebox.available ? "text-neutral-400" : "text-amber-300"}`}>
+        {moviebox.message}
+      </p>
 
       <details className="group rounded-lg text-xs text-neutral-500">
         <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400">
@@ -116,12 +141,6 @@ export const WatchPlayer = ({
               <MonitorPlay aria-hidden="true" className="size-4" /> Open in video app
             </Button>
           </div>
-          {query.data && query.data.moviebox.status !== "ready" ? (
-            <p>MovieBox: {query.data.moviebox.status === "blocked_setup" ? "Server setup is incomplete. Using embed fallbacks." :
-              query.data.moviebox.status === "unsupported_adaptive" ? "This adaptive stream is not supported yet. Using embed fallbacks." :
-              query.data.moviebox.status === "ambiguous" ? "Title matching is ambiguous. Using embed fallbacks." :
-              "No verified playable direct source is available. Using embed fallbacks."}</p>
-          ) : null}
           <p id={unavailableId}>Device video-app launching is not supported yet. Embed pages are not direct video files, and a web stream URL does not guarantee default-app support.</p>
           <p>Some providers reject sandboxed playback. Try another source or open the selected provider in a new tab. External pages are outside this player’s sandbox and may show ads, popups, or redirects. Playback is not guaranteed.</p>
         </div>

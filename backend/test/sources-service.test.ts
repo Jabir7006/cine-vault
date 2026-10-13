@@ -6,6 +6,7 @@ import type { DirectSource } from "../src/providers/types";
 
 const source: DirectSource = {
   type: "direct", provider: "moviebox", label: "MovieBox", format: "progressive", sessionId: "fixture-session",
+  issuedAt: 1000, revision: 1, controlToken: "c".repeat(43), controlExpiresAt: 330000,
   expiresAt: 300000, renewAt: 270000,
   qualities: [{ id: "quality", label: "720p", height: 720, url: "/media/fixture" }],
   audios: [{ id: "audio", label: "Source audio", lang: "und" }], selectedAudio: "audio", subtitles: [],
@@ -13,7 +14,7 @@ const source: DirectSource = {
 
 test("missing MovieBox setup returns versioned unchanged embed candidates", async () => {
   const result = await createSourceService()("movie", "27205");
-  assert.equal(result.version, 1);
+  assert.equal(result.version, 2);
   assert.equal(result.moviebox.status, "blocked_setup");
   assert.deepEqual(result.sources.map((item) => item.provider), ["embedwave.cc", "vidcore.org", "vidsrc.to", "vidlink", "2embed"]);
 });
@@ -45,7 +46,7 @@ test("discovery guard is independent of media capabilities", async () => {
 test("media route refuses expired/invalid tokens and never accepts arbitrary URLs", async () => {
   let relays = 0;
   const app = createApp({ allowedOrigins: ["http://localhost:5173"], media: {
-    registry: { register: () => "fixture", revoke: () => undefined, resolve: (token) => token === "fixture" ? { kind: "video", url: "https://example.com/video", headers: {} } : undefined },
+    registry: { register: () => "fixture", registerBatch: () => ({ tokens: ["fixture"], expiresAt: 300000 }), expiresAt: () => 300000, revoke: () => undefined, resolve: (token) => token === "fixture" ? { kind: "video", url: "https://example.com/video", headers: {} } : undefined },
     transport: { probe: async () => true, caption: async () => "WEBVTT\n", relay: async () => { relays++; return new Response("fixture", { headers: { "content-type": "video/mp4" } }); } },
   } });
   assert.equal((await app.request("/media/unknown?url=https://example.com")).status, 403);

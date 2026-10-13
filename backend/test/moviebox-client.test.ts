@@ -50,7 +50,7 @@ test("missing secret blocks setup before any fetch and diagnostics reveal counts
   assert.deepEqual(client.diagnostics(), { httpAttempts: 0, loginRequests: 0, searchRequests: 0, sessionReuses: 0 });
 });
 
-test("visitor login {}, envelope search, stable identity, no forwarding IP, sequential reuse", async () => {
+test("visitor login {}, envelope search, stable identity, spoofed forwarding IP, sequential reuse", async () => {
   const { client, calls } = fixture((call) => isLogin(call) ? login() : json({ items: [{ title: "Inception" }] }));
   await client.init();
   await client.search("Inception");
@@ -63,7 +63,8 @@ test("visitor login {}, envelope search, stable identity, no forwarding IP, sequ
     const headers = new Headers(call.init.headers);
     assert.equal(headers.get("x-client-info"), identity.clientInfo);
     assert.equal(headers.get("user-agent"), identity.userAgent);
-    assert.equal(headers.get("x-forwarded-for"), null);
+    assert.ok(headers.get("x-forwarded-for")?.match(/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/));
+    assert.equal(headers.get("connection"), "keep-alive");
     assert.equal(call.init.redirect, "manual");
     assert.ok(call.init.signal);
   }
@@ -171,14 +172,40 @@ test("all network failures bounded; no credential or raw failure leakage", async
   assert.equal(client.diagnostics().loginRequests, 1);
 });
 
-for (const [status, code] of [[403, "denied"], [429, "rate_limit"], [406, "http"], [407, "http"], [400, "http"]] as const) {
-  test(`${status} surfaces immediately without host hopping or session refresh`, async () => {
-    const { client, calls } = fixture((call) => isLogin(call) ? login() : new Response("untrusted-sensitive-body", { status, headers: { "retry-after": "1", "x-user": '{"token":"do-not-adopt"}' } }));
-    await rejects(client.search("Inception"), code, status);
-    assert.equal(calls.length, 2);
-    assert.equal(client.diagnostics().loginRequests, 1);
+test("400 surfaces immediately without host hopping or session refresh", async () => {
+  const { client, calls } = fixture((call) => isLogin(call) ? login() : new Response("untrusted-sensitive-body", { status: 400, headers: { "retry-after": "1", "x-user": '{"token":"do-not-adopt"}' } }));
+  await rejects(client.search("Inception"), "http", 400);
+  assert.equal(calls.length, 2);
+  assert.equal(client.diagnostics().loginRequests, 1);
+});
+
+test("403 triggers session refresh (one refresh, then terminal)", async () => {
+  let logins = 0;
+  const { client, calls } = fixture((call) => {
+    if (isLogin(call)) return login(`offline-${++logins}`);
+    return new Response(null, { status: 403 });
   });
-}
+  await rejects(client.search("Inception"), "denied", 403);
+  assert.equal(logins, 2); // initial login + one refresh attempt
+  // 403 is not failover-retried in #requestHosts; #request refreshes once and retries:
+  // login + 1 attempt(403) + refresh login + 1 attempt(403) = 4
+  assert.equal(calls.length, 4);
+});
+
+test("406/429/407 failover to next host without session refresh", async () => {
+  for (const status of [406, 429, 407]) {
+    let logins = 0;
+    const { client, calls } = fixture((call, i) => {
+      if (isLogin(call)) return login(`offline-${++logins}`);
+      // First attempt on host 0 fails, second attempt on host 1 succeeds.
+      if (i === 1) return new Response("untrusted-sensitive-body", { status, headers: { "retry-after": "1" } });
+      return json([]);
+    });
+    await client.search("Inception");
+    assert.equal(calls.length, 3); // login + failed attempt + successful retry
+    assert.equal(client.diagnostics().loginRequests, 1);
+  }
+});
 
 test("redirect status and already followed redirect rejected", async () => {
   for (const response of [new Response(null, { status: 302, headers: { location: "https://evil.test" } }), (() => {

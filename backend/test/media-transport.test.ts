@@ -265,6 +265,173 @@ test("probe performs bounded range GET, validates prefix and stops full-body ups
     assert.equal(bad.requests[0]!.destroyed, true);
   }
 });
+test("probe failure evidence retains fixed validation codes and only actually observed status", async () => {
+  const cases: Array<{ reply: Reply; options?: Partial<TransportOptions>; code: string; httpStatus?: number }> = [
+    { reply: { status: 403, headers: { "set-cookie": "private-cookie", etag: '"private-etag"', location: media.url } }, code: "invalid_response", httpStatus: 403 },
+    { reply: { status: 302, headers: { location: "https://private.example/?token=private" } }, code: "invalid_response", httpStatus: 302 },
+    { reply: { body: Buffer.from("<html>not movie</html>") }, code: "invalid_container", httpStatus: 200 },
+    { reply: { error: true }, code: "upstream" },
+    { reply: {}, options: { resolver: async () => [{ address: "127.0.0.1", family: 4 }] }, code: "blocked_address" },
+    { reply: {}, options: { resolver: async () => { throw new Error(`private DNS ${media.url}`); } }, code: "upstream" },
+    { reply: {}, options: { request: () => { throw new Error(`private TLS ${media.url}`); } }, code: "upstream" },
+    { reply: { hang: true }, options: { probeTimeoutMs: 5 }, code: "timeout", httpStatus: 200 },
+    { reply: { noHeaders: true }, options: { probeTimeoutMs: 5 }, code: "timeout" },
+  ];
+  for (const row of cases) {
+    const f = fixture(row.reply, row.options);
+    const result = await f.transport.probeEvidence(media);
+    assert.deepEqual(result, { playable: false, failure: { code: row.code, ...(row.httpStatus === undefined ? {} : { httpStatus: row.httpStatus }) } });
+    for (const privateValue of ["example", "secret", "private-cookie", "private-etag", "token=", "127.0.0.1"]) {
+      assert.equal(JSON.stringify(result).includes(privateValue), false);
+    }
+    if (row.reply.status === 302) assert.equal(f.calls.length, 1);
+  }
+  const unapproved = fixture();
+  assert.deepEqual(await unapproved.transport.probeEvidence({ ...media, url: "https://unapproved.example/private" }),
+    { playable: false, failure: { code: "invalid_resource" } });
+  assert.equal(unapproved.calls.length, 0);
+});
+
+test("probeEvidence preserves eligibility without validators and records only bounded strong original-server evidence", async () => {
+  for (const etag of [undefined, 'W/"version"', "unquoted", '"bad\r\ntag"', '"a", "b"',
+    `"${"x".repeat(1024)}"`, [ '"one"', '"two"' ]]) {
+    const f = fixture({ headers: { "content-type": "video/mp4", "content-length": "24", etag } });
+    assert.deepEqual(await f.transport.probeEvidence(media), { playable: true });
+    assert.equal(await f.transport.probe(media), true);
+  }
+  const chunked = fixture({ headers: { "content-type": "video/mp4", etag: '"version"' } });
+  assert.deepEqual(await chunked.transport.probeEvidence(media), { playable: true });
+  const evidenceReplies: { reply: Reply; total: number }[] = [
+    { reply: { headers: { "content-type": "video/mp4", "content-length": "24", etag: '"version"' } }, total: 24 },
+    { reply: { status: 206, headers: { "content-type": "video/mp4", "content-length": "4096", "content-range": "bytes 0-4095/5000", etag: '"version"' }, body: Buffer.concat([mp4, Buffer.alloc(4072)]) }, total: 5000 },
+    { reply: { status: 206, headers: { "content-type": "video/mp4", "content-range": "bytes 0-23/24", etag: '"version"' } }, total: 24 },
+  ];
+  for (const { reply, total } of evidenceReplies) {
+    // A ranged probe total is the complete representation, never the returned prefix length.
+    const f = fixture(reply);
+    const evidence = await f.transport.probeEvidence(media);
+    assert.deepEqual(evidence, { playable: true, representation: { etag: '"version"', length: total } });
+    assert.equal(f.requests[0]!.destroyed, true);
+    assert.equal(f.responses[0]!.destroyed, true);
+    assert.equal((f.calls[0]!.options.headers as Record<string, string>)["if-match"], undefined);
+  }
+  assert.deepEqual(await fixture({ body: Buffer.from("<html>not MP4</html>"), headers: { "content-type": "video/mp4", "content-length": "20", etag: '"version"' } }).transport.probeEvidence(media), { playable: false, failure: { code: "invalid_container", httpStatus: 200 } });
+  assert.deepEqual(await fixture({ headers: { "content-type": "video/mp4", "content-length": "12", etag: '"version"' } }).transport.probeEvidence(media), { playable: false, failure: { code: "invalid_response", httpStatus: 200 } });
+});
+
+test("If-Match originates only from typed video evidence, never arbitrary descriptor headers or captions", () => {
+  const bound = { ...media, representation: { etag: '"version"', length: 24 }, headers: { "If-Match": '"forged"', "If-Range": '"forged"', Authorization: "forbidden" } };
+  assert.equal(resourceHeaders(bound)["if-match"], '"version"');
+  assert.equal(resourceHeaders({ ...media, headers: bound.headers })["if-match"], undefined);
+  assert.equal(resourceHeaders(bound)["if-range"], undefined);
+  assert.equal(resourceHeaders(bound).authorization, undefined);
+  assert.equal(resourceHeaders({ ...media, kind: "subtitle", headers: { "If-Match": '"forged"', Cookie: "secret" } })["if-match"], undefined);
+  assert.throws(() => resourceHeaders({ ...bound, kind: "subtitle" }), errorCode("invalid_resource"));
+  assert.throws(() => resourceHeaders({ ...bound, representation: { etag: 'W/"version"', length: 24 } }), errorCode("invalid_resource"));
+});
+
+test("evidence-bound full, partial and HEAD relays verify complete representation before returning", async () => {
+  const bound = { ...media, representation: { etag: '"version"', length: 24 } };
+  for (const method of ["GET", "HEAD"] as const) {
+    for (const ranged of [false, true]) {
+      const f = fixture({ status: ranged ? 206 : 200, body: mp4, headers: { "content-type": "video/mp4", "content-length": "24", etag: '"version"', ...(ranged ? { "content-range": "bytes 0-23/24" } : {}) } });
+      const response = await f.transport.relay(bound, method, ranged ? "bytes=0-4095" : undefined);
+      assert.equal((f.calls[0]!.options.headers as Record<string, string>)["if-match"], '"version"');
+      assert.equal(response.headers.get("etag"), null);
+      assert.equal(response.headers.get("if-match"), null);
+      if (method === "HEAD") assert.equal(response.body, null);
+      else assert.deepEqual(Buffer.from(await response.arrayBuffer()), mp4);
+    }
+  }
+  const partial = fixture({ status: 206, body: mp4.subarray(0, 4), headers: { "content-type": "video/mp4", "content-length": "4", "content-range": "bytes 0-3/24", etag: '"version"' } });
+  assert.equal(await (await partial.transport.relay(bound, "GET", "bytes=0-3")).arrayBuffer().then((b) => b.byteLength), 4);
+  const noPrefixLength = fixture({ status: 206, body: mp4.subarray(20), headers: { "content-type": "video/mp4", "content-range": "bytes 20-23/24", etag: '"version"' } });
+  assert.equal((await (await noPrefixLength.transport.relay(bound, "GET", "bytes=-4")).arrayBuffer()).byteLength, 4);
+});
+
+test("ignored conditions, weak/missing/changed validators, totals and 412 reject before bytes with sanitized errors", async () => {
+  const bound = { ...media, representation: { etag: '"version"', length: 24 } };
+  for (const method of ["GET", "HEAD"] as const) {
+    for (const reply of [
+      { headers: { "content-type": "video/mp4", "content-length": "24" } },
+      { headers: { "content-type": "video/mp4", "content-length": "24", etag: 'W/"version"' } },
+      { headers: { "content-type": "video/mp4", "content-length": "24", etag: '"changed"' } },
+      { headers: { "content-type": "video/mp4", "content-length": "25", etag: '"version"' } },
+      { headers: { "content-type": "video/mp4", etag: '"version"' } },
+      { status: 206, headers: { "content-type": "video/mp4", "content-length": "4", "content-range": "bytes 0-3/25", etag: '"version"' } },
+      { status: 206, headers: { "content-type": "video/mp4", "content-length": "4", "content-range": "bytes 0-3/*", etag: '"version"' } },
+      { status: 412, headers: { "content-type": "video/mp4", "content-length": "24", etag: '"version"' } },
+    ]) {
+      const f = fixture({ ...reply, hang: true });
+      await assert.rejects(f.transport.relay(bound, method, reply.status === 206 ? "bytes=0-3" : undefined), errorCode("invalid_response"));
+      assert.equal(f.responses[0]!.readableFlowing, false);
+      assert.equal(f.requests[0]!.destroyed, true);
+      assert.equal(f.responses[0]!.destroyed, true);
+    }
+  }
+});
+
+test("bound 416 verifies original total and validator but never trusts error-body Content-Length", async () => {
+  const bound = { ...media, representation: { etag: '"version"', length: 24 } };
+  const f = fixture({ status: 416, hang: true, headers: { "content-range": "bytes */24", etag: '"version"', "content-length": "99999" } });
+  const response = await f.transport.relay(bound, "GET", "bytes=24-");
+  assert.equal(response.status, 416);
+  assert.equal(response.body, null);
+  assert.equal(response.headers.get("content-length"), "0");
+  for (const headers of [{ "content-range": "bytes */25", etag: '"version"' },
+    { "content-range": "bytes */24" }, { "content-range": "bytes */24", etag: 'W/"version"' }]) {
+    await assert.rejects(fixture({ status: 416, headers }).transport.relay(bound, "HEAD", "bytes=25-"), errorCode("invalid_response"));
+  }
+});
+
+test("evidence-bound eligibility probes cannot accept changed evidence even with genuine MP4 bytes", async () => {
+  const bound = { ...media, representation: { etag: '"version"', length: 24 } };
+  const good = fixture({ headers: { "content-type": "video/mp4", "content-length": "24", etag: '"version"' } });
+  assert.deepEqual(await good.transport.probeEvidence(bound), { playable: true, representation: bound.representation });
+  assert.equal((good.calls[0]!.options.headers as Record<string, string>)["if-match"], '"version"');
+  for (const reply of [{ headers: { "content-type": "video/mp4", "content-length": "24", etag: '"changed"' } },
+    { headers: { "content-type": "video/mp4", "content-length": "25", etag: '"version"' } },
+    { headers: { "content-type": "video/mp4", "content-length": "24" } }, { status: 412 }]) {
+    assert.deepEqual(await fixture(reply).transport.probeEvidence(bound), { playable: false, failure: { code: "invalid_response", httpStatus: reply.status ?? 200 } });
+    assert.equal(await fixture(reply).transport.probe(bound), false);
+  }
+});
+
+test("duplicate original-server ETag fields cannot become continuity evidence", async () => {
+  const request: TransportRequest = (_url, _options, callback) => {
+    const req = Object.assign(new EventEmitter(), {
+      end() {
+        queueMicrotask(() => {
+          const response = message(200, { "content-type": "video/mp4", "content-length": "24", etag: '"version"' });
+          // Node may discard duplicates from .headers for singleton fields; inspect originals too.
+          response.rawHeaders = ["ETag", '"version"', "etag", '"different"'];
+          callback(response);
+          (response as unknown as PassThrough).end(mp4);
+        });
+      },
+      destroy() { return req; },
+    });
+    return req as unknown as ClientRequest;
+  };
+  const f = fixture({}, { request });
+  assert.deepEqual(await f.transport.probeEvidence(media), { playable: true });
+  await assert.rejects(f.transport.relay({ ...media, representation: { etag: '"version"', length: 24 } }, "GET"), errorCode("invalid_response"));
+});
+
+test("mutable caller evidence cannot weaken an in-flight request after If-Match generation", async () => {
+  let releaseDns: ((addresses: { address: string; family: number }[]) => void) | undefined;
+  const f = fixture({ headers: { "content-type": "video/mp4", "content-length": "24", etag: '"changed"' } }, {
+    resolver: () => new Promise((resolve) => { releaseDns = resolve; }),
+  });
+  const bound: MediaResource = { ...media, representation: { etag: '"version"', length: 24 } };
+  const pending = f.transport.relay(bound, "GET");
+  bound.representation!.etag = '"changed"';
+  delete bound.representation;
+  releaseDns!([{ address: "8.8.8.8", family: 4 }]);
+  await assert.rejects(pending, errorCode("invalid_response"));
+  assert.equal((f.calls[0]!.options.headers as Record<string, string>)["if-match"], '"version"');
+});
+
 test("probe and caption body deadlines bound partial responses; probe cancellation propagates", async () => {
   const f = fixture({ hang: true }, { probeTimeoutMs: 5 });
   assert.equal(await f.transport.probe(media), false);

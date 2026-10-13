@@ -59,6 +59,7 @@ export interface PrivateCaptionMetadata {
   label?: string;
   format?: string;
   size?: number;
+  expiresAt?: number;
   headers: Readonly<Record<string, string>>;
   cookie?: string;
   signCookie?: string;
@@ -130,6 +131,86 @@ function yearField(row: Record<string, unknown>): number | undefined {
     return releaseYear(row[key]);
   });
   return values.length && values.every((value) => value !== undefined && value === values[0]) ? values[0] : undefined;
+}
+/**
+ * Clean MovieBox subject titles before parsing/matching, mirroring the reference TUI's
+ * `clean_moviebox_title`. Strips release tags ([Dub], [1080p], [RAW]), season tags,
+ * resolution suffixes, language suffixes and trailing brackets/years that would
+ * prevent an exact title match against TMDB metadata.
+ */
+export function cleanMovieBoxTitle(rawTitle: string): string {
+  let title = rawTitle.trim();
+  if (!title) return "";
+
+  // Strip leading [tag] groups (e.g. [Dub], [RAW], [1080p], [Dual Audio]).
+  while (title.startsWith("[")) {
+    const closePos = title.indexOf("]");
+    if (closePos === -1) break;
+    const remainder = title.slice(closePos + 1).trim();
+    if (remainder) title = remainder; else break;
+  }
+
+  // Strip the first [tag] if not at the very start (e.g. "Movie [2021]").
+  const bracketPos = title.indexOf("[");
+  if (bracketPos > 0) {
+    title = title.slice(0, bracketPos).trim();
+  }
+
+  // Strip parenthesized non-year suffixes (e.g. "Movie (Director's Cut)").
+  // A 4-digit year inside parentheses is kept (e.g. "Inception (2010)").
+  const parenPos = title.indexOf("(");
+  if (parenPos > 0) {
+    const inside = title.slice(parenPos + 1).split(")")[0] ?? "";
+    const isYear = /^\d{4}$/.test(inside) && parseInt(inside, 10) >= 1900 && parseInt(inside, 10) <= 2099;
+    if (!isYear) title = title.slice(0, parenPos).trim();
+  }
+
+  // Strip language/dub tags after " - " separator.
+  const dashPos = title.lastIndexOf(" - ");
+  if (dashPos > 0) {
+    const suffix = title.slice(dashPos + 3);
+    const lowerSuffix = suffix.toLowerCase();
+    const tags = ["hindi", "tamil", "telugu", "kannada", "malayalam", "bengali", "marathi",
+      "punjabi", "gujarati", "urdu", "english", "spanish", "french", "german", "italian",
+      "japanese", "korean", "chinese", "russian", "portuguese", "turkish", "arabic", "dub", "audio", "multi"];
+    const isTag = tags.some((tag) => lowerSuffix.includes(tag)) ||
+      /^[sS]\d+/.test(suffix) || /season/i.test(suffix);
+    if (isTag) title = title.slice(0, dashPos).trim();
+  }
+
+  // Strip trailing " S{number}" (e.g. "Breaking Bad S01" -> "Breaking Bad").
+  const sMatch = title.match(/ S(\d[\d-]*)$/);
+  if (sMatch) {
+    title = title.slice(0, sMatch.index).trim();
+  }
+
+  // Strip " Season {n}" suffix.
+  const seasonMatch = title.match(/ Season \d+$/i);
+  if (seasonMatch) {
+    title = title.slice(0, seasonMatch.index).trim();
+  }
+
+  // Strip resolution suffixes (e.g. "_1080P", ".720", " 1080p", "-480p").
+  for (const sep of ["_", " ", ".", "-"]) {
+    const sepIdx = title.lastIndexOf(sep);
+    if (sepIdx > 0) {
+      const suffix = title.slice(sepIdx + 1);
+      let resStr: string | undefined;
+      if (suffix.endsWith("p") || suffix.endsWith("P")) {
+        resStr = suffix.slice(0, -1);
+      } else {
+        resStr = suffix;
+      }
+      if (/^\d{3,4}$/.test(resStr) && parseInt(resStr, 10) >= 144 && parseInt(resStr, 10) <= 8640) {
+        title = title.slice(0, sepIdx).trim();
+      }
+    }
+  }
+
+  // Strip trailing separators.
+  title = title.replace(/[-_:. ]+$/u, "").trim();
+
+  return title || rawTitle.trim();
 }
 function identity(value: unknown): SubjectIdentity | undefined {
   const row = record(value);
@@ -225,17 +306,20 @@ function stream(value: unknown): PrivateStreamMetadata | undefined {
   if (!row) return;
   const resourceId = idField(row, ["resourceId", "id"]);
   if (["resourceId", "id"].some((key) => Object.hasOwn(row, key)) && !resourceId) return;
+  if (Object.hasOwn(row, "expiresAt") && integer(row.expiresAt, Number.MAX_SAFE_INTEGER) === undefined) return;
   const rawUrl = row.url ?? row.resourceLink ?? row.streamUrl;
   const url = privateUrl(rawUrl);
   if (rawUrl !== undefined && !url) return;
   const se = row.se === undefined ? undefined : integer(row.se, MAX_EPISODE);
   const ep = row.ep === undefined ? undefined : integer(row.ep, MAX_EPISODE);
   if ((row.se !== undefined || row.ep !== undefined) && (se === undefined || ep === undefined)) return;
-  const resolutions = row.resolutions === undefined ? [] : list(row.resolutions, 32).map((height) => {
+  const rawResolutions = row.resolutions === undefined ? [] : Array.isArray(row.resolutions) ? row.resolutions :
+    typeof row.resolutions === "string" && row.resolutions.length <= 256 ? row.resolutions.split(",") : malformed();
+  const resolutions = list(rawResolutions, 32).map((height) => {
     const parsed = integer(height, 8640);
     return parsed === undefined ? malformed() : parsed;
   });
-  return { resourceId, url, format: text(row.format, 64), height: integer(row.height ?? row.resolution, 8640),
+  return { resourceId, url, format: text(row.format, 64), height: integer(row.height ?? row.resolution, 8640) ?? (resolutions.length ? Math.max(...resolutions) : undefined),
     quality: text(row.quality, 64), codec: text(row.codecName ?? row.codec, 128), resolutions: [...new Set(resolutions)],
     size: integer(row.size, Number.MAX_SAFE_INTEGER, 0), fileName: text(row.fileName), title: text(row.title),
     language: text(row.language ?? row.lanName, 64), uploadBy: text(row.uploadBy, 128), source: text(row.source, 128),
@@ -275,13 +359,14 @@ export function parseCaptions(value: unknown): PrivateCaptionMetadata[] {
   return items.flatMap((value) => {
     const row = record(value);
     if (!row) return [];
+    if (Object.hasOwn(row, "expiresAt") && integer(row.expiresAt, Number.MAX_SAFE_INTEGER) === undefined) return [];
     const url = privateUrl(row.url);
     const id = idField(row, ["captionId", "id"]);
     const resourceId = row.resourceId === undefined ? undefined : parseMovieBoxId(row.resourceId);
     if (!url || (["captionId", "id"].some((key) => Object.hasOwn(row, key)) && !id) || (row.resourceId !== undefined && !resourceId)) return [];
     const auth = authorizationMetadata(row);
     return [{ id, resourceId, url, lang: text(row.lang ?? row.lan ?? row.language, 64), label: text(row.label ?? row.lanName ?? row.name, 128),
-      format: text(row.format, 64), size: integer(row.size, Number.MAX_SAFE_INTEGER, 0), ...auth, headers: { ...inherited.headers, ...auth.headers },
+      format: text(row.format, 64), size: integer(row.size, Number.MAX_SAFE_INTEGER, 0), expiresAt: integer(row.expiresAt, Number.MAX_SAFE_INTEGER), ...auth, headers: { ...inherited.headers, ...auth.headers },
       cookie: auth.cookie ?? inherited.cookie, signCookie: auth.signCookie ?? inherited.signCookie, policy: auth.policy ?? inherited.policy,
       requiresVerification: auth.requiresVerification || inherited.requiresVerification }];
   });

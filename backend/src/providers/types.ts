@@ -26,6 +26,10 @@ export interface DirectSource {
   label: string;
   format: "progressive";
   sessionId: string;
+  issuedAt: number;
+  revision: number;
+  controlToken: string;
+  controlExpiresAt: number;
   expiresAt: number;
   renewAt: number;
   qualities: DirectQuality[];
@@ -46,10 +50,13 @@ export type Source = DirectSource | EmbedSource;
 export type MovieBoxStatus = "ready" | "blocked_setup" | "not_found" | "ambiguous" |
   "unverified" | "unsupported_adaptive" | "unsupported_format" | "unavailable";
 
+export type MovieBoxSetupReason = "missing_signing_key" | "invalid_signing_key" |
+  "missing_tmdb_token" | "missing_media_hosts" | "invalid_relay_key" | "invalid_configuration";
+
 export interface SourcesResponse {
-  version: 1;
+  version: 2;
   sources: Source[];
-  moviebox: { status: MovieBoxStatus };
+  moviebox: { status: MovieBoxStatus; reason?: MovieBoxSetupReason };
 }
 
 export interface ResolveParams {

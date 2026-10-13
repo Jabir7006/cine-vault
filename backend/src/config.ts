@@ -1,6 +1,7 @@
 import { config as loadEnv } from "dotenv";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { parseListenerHost } from "./listener";
 
 // Load backend/.env relative to this file so it works regardless of cwd.
 loadEnv({ path: resolve(dirname(fileURLToPath(import.meta.url)), "..", ".env") });
@@ -11,6 +12,7 @@ function env(key: string, fallback = ""): string {
 }
 
 export const config = {
+  host: parseListenerHost(process.env.HOST),
   port: Number(env("PORT", "8787")),
   allowedOrigins: env("ALLOWED_ORIGIN", "http://localhost:5173")
     .split(",")

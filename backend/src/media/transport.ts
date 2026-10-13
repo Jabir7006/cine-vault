@@ -4,7 +4,8 @@ import type { RequestOptions } from "node:https";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { isIP } from "node:net";
 import { convertCaptionToWebVtt } from "./captions.ts";
-import type { MediaResource, MediaTransport } from "./types.ts";
+import { isMediaRepresentation, isStrongMediaEtag, mediaProbeFailureCodes } from "./types.ts";
+import type { MediaProbeEvidence, MediaProbeFailureCode, MediaRepresentation, MediaResource, MediaTransport } from "./types.ts";
 
 export type TransportErrorCode = "invalid_resource" | "invalid_range" | "blocked_address" | "busy" | "cancelled" | "timeout" | "upstream" | "invalid_response" | "too_large";
 export class TransportError extends Error {
@@ -94,10 +95,15 @@ export function resourceHeaders(resource: MediaResource, range?: string): Record
     if (typeof value !== "string" || value.length > 8192 || /[\x00-\x1f\x7f]/.test(value) || key in output) return fail("invalid_resource");
     output[key] = value;
   }
+  if (resource.representation !== undefined) {
+    if (resource.kind !== "video" || !isMediaRepresentation(resource.representation)) return fail("invalid_resource");
+    // Never accept conditional authorization/validators through arbitrary headers.
+    output["if-match"] = resource.representation.etag;
+  }
   if (range !== undefined) output.range = range;
   return output;
 }
-type ResponseMetadata = { status: number; length?: number; headers: Headers };
+type ResponseMetadata = { status: number; length?: number; total?: number; headers: Headers };
 function header(response: IncomingMessage, key: string): string | undefined {
   const value = response.headers[key];
   if (Array.isArray(value)) return fail("invalid_response");
@@ -114,6 +120,7 @@ export function validateVideoResponse(response: IncomingMessage, requested?: Byt
   if (encoding && encoding !== "identity") return fail("invalid_response");
   const lengthHeader = header(response, "content-length");
   let length = lengthHeader === undefined ? undefined : responseNumber(lengthHeader);
+  let total = length;
   const headers = new Headers({ "content-type": "video/mp4", "x-content-type-options": "nosniff", "cache-control": "private, no-store" });
   const contentRange = header(response, "content-range");
   if (status === 416) {
@@ -122,7 +129,7 @@ export function validateVideoResponse(response: IncomingMessage, requested?: Byt
     if (total > 0 && ("suffix" in requested || requested.start < total)) return fail("invalid_response");
     headers.set("content-range", contentRange);
     headers.set("content-length", "0");
-    return { status, length: 0, headers };
+    return { status, length: 0, total, headers };
   }
   const mime = header(response, "content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (mime !== "video/mp4" || (length !== undefined && length === 0)) return fail("invalid_response");
@@ -131,7 +138,7 @@ export function validateVideoResponse(response: IncomingMessage, requested?: Byt
     if (!requested || !match) return fail("invalid_response");
     const start = responseNumber(match[1]!);
     const end = responseNumber(match[2]!);
-    const total = responseNumber(match[3]!);
+    total = responseNumber(match[3]!);
     if (end < start || total <= end || (length !== undefined && length !== end - start + 1)) return fail("invalid_response");
     length = end - start + 1;
     const expectedStart = "suffix" in requested ? Math.max(0, total - requested.suffix) : requested.start;
@@ -141,7 +148,34 @@ export function validateVideoResponse(response: IncomingMessage, requested?: Byt
   } else if (contentRange) return fail("invalid_response");
   if (length !== undefined) headers.set("content-length", String(length));
   if (header(response, "accept-ranges") === "bytes") headers.set("accept-ranges", "bytes");
-  return { status, length, headers };
+  return { status, length, total, headers };
+}
+function responseRepresentation(response: IncomingMessage, metadata: ResponseMetadata): MediaRepresentation | undefined {
+  // A malformed/weak/missing ETag does not invalidate an otherwise eligible MP4.
+  // Do not promote duplicated validators (including synthetic header arrays).
+  const etag = response.headers.etag;
+  let originalEtagCount = 0;
+  const rawHeaders = response.rawHeaders ?? [];
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    if (rawHeaders[index]?.toLowerCase() === "etag") {
+      originalEtagCount++;
+      if (rawHeaders[index + 1] !== etag) return undefined;
+    }
+  }
+  if (originalEtagCount > 1 || !isStrongMediaEtag(etag) || metadata.total === undefined || metadata.total <= 0) return undefined;
+  return { etag, length: metadata.total };
+}
+function bindRepresentation(resource: MediaResource): MediaResource {
+  if (resource.representation === undefined) return resource;
+  if (resource.kind !== "video" || !isMediaRepresentation(resource.representation)) return fail("invalid_resource");
+  // Snapshot before DNS/headers awaits: caller mutation must not weaken the condition.
+  return { ...resource, representation: Object.freeze({ etag: resource.representation.etag, length: resource.representation.length }) };
+}
+function validateRepresentation(response: IncomingMessage, metadata: ResponseMetadata, expected?: MediaRepresentation): MediaRepresentation | undefined {
+  const actual = responseRepresentation(response, metadata);
+  if (expected !== undefined && (!isMediaRepresentation(expected) || !actual ||
+      actual.etag !== expected.etag || actual.length !== expected.length)) return fail("invalid_response");
+  return actual;
 }
 const MP4_BRANDS = new Set(["isom", "iso2", "iso3", "iso4", "iso5", "iso6", "iso7", "iso8", "iso9", "mp41", "mp42", "avc1", "M4V ", "M4VH", "M4VP"]);
 export function isMp4Prefix(bytes: Uint8Array): boolean {
@@ -265,10 +299,12 @@ export class SecureMediaTransport implements MediaTransport {
   }
   async relay(resource: MediaResource, method: "GET" | "HEAD", range?: string, signal?: AbortSignal): Promise<Response> {
     if (resource.kind !== "video" || !["GET", "HEAD"].includes(method)) return fail("invalid_resource");
+    resource = bindRepresentation(resource);
     const parsed = validateRange(range);
     const transfer = await this.open(resource, method, range, signal, this.totalMs);
     try {
       const metadata = validateVideoResponse(transfer.response, parsed);
+      validateRepresentation(transfer.response, metadata, resource.representation);
       if (method === "HEAD" || metadata.status === 416) {
         transfer.stop();
         return new Response(null, { status: metadata.status, headers: metadata.headers });
@@ -307,34 +343,49 @@ export class SecureMediaTransport implements MediaTransport {
     }
   }
   async probe(resource: MediaResource, signal?: AbortSignal): Promise<boolean> {
-    if (resource.kind !== "video") return false;
+    return (await this.probeEvidence(resource, signal)).playable;
+  }
+  async probeEvidence(resource: MediaResource, signal?: AbortSignal): Promise<MediaProbeEvidence> {
     let transfer: Transfer | undefined;
+    const rejected = (code: MediaProbeFailureCode): MediaProbeEvidence => {
+      const status = transfer?.response.statusCode;
+      const httpStatus = typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
+      return { playable: false, failure: { code, ...(httpStatus === undefined ? {} : { httpStatus }) } };
+    };
+    if (resource.kind !== "video") return rejected("invalid_resource");
     try {
+      resource = bindRepresentation(resource);
       transfer = await this.open(resource, "GET", "bytes=0-4095", signal, this.probeMs);
       const metadata = validateVideoResponse(transfer.response, { start: 0, end: 4095 });
-      if (metadata.status === 416) return false;
+      if (metadata.status === 416) return rejected("range_unsatisfied");
+      const representation = validateRepresentation(transfer.response, metadata, resource.representation);
+      const evidence = (prefix: Buffer): MediaProbeEvidence => {
+        if (!isMp4Prefix(prefix)) return rejected("invalid_container");
+        return representation ? { playable: true, representation } : { playable: true };
+      };
       const chunks: Buffer[] = [];
       let length = 0;
       for await (const chunk of transfer.response) {
         if (transfer.error()) throw transfer.error();
         const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        if (metadata.length !== undefined && data.length > metadata.length - length) return rejected("invalid_response");
         const part = data.subarray(0, 4096 - length);
         chunks.push(part);
         length += part.length;
         const prefix = Buffer.concat(chunks, length);
         if (prefix.length >= 16) {
           const size = prefix.readUInt32BE(0);
-          if (prefix.toString("latin1", 4, 8) !== "ftyp" || size < 16 || size > 4096 || size % 4) return false;
-          if (length >= size) return isMp4Prefix(prefix);
+          if (prefix.toString("latin1", 4, 8) !== "ftyp" || size < 16 || size > 4096 || size % 4) return rejected("invalid_container");
+          if (length >= size) return evidence(prefix);
         }
-        if (length >= 4096) return false;
+        if (length >= 4096) return rejected("invalid_container");
       }
       if (transfer.error()) throw transfer.error();
-      return isMp4Prefix(Buffer.concat(chunks, length));
+      return evidence(Buffer.concat(chunks, length));
     } catch (error) {
       const safe = transfer?.error() ?? error;
       if (safe instanceof TransportError && safe.code === "cancelled") throw safe;
-      return false;
+      return rejected(safe instanceof TransportError && mediaProbeFailureCodes.includes(safe.code) ? safe.code : "unknown");
     } finally { transfer?.stop(); }
   }
   async caption(resource: MediaResource, signal?: AbortSignal): Promise<string> {

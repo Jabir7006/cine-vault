@@ -1,5 +1,6 @@
 import { getEmbedSources } from "./embed";
-import type { DirectSource, MediaType, MovieBoxStatus, ResolveParams, SourcesResponse } from "./types";
+import { isMovieBoxSetupReason } from "../moviebox/runtime-status";
+import type { DirectSource, MediaType, MovieBoxSetupReason, MovieBoxStatus, ResolveParams, SourcesResponse } from "./types";
 
 export interface MovieBoxResolution {
   status: MovieBoxStatus;
@@ -14,7 +15,8 @@ export type MovieBoxResolver = (
 ) => Promise<MovieBoxResolution>;
 
 /** A MovieBox miss must not prevent discovery of the unchanged embed candidates. */
-export function createSourceService(resolveMovieBox?: MovieBoxResolver) {
+export function createSourceService(resolveMovieBox?: MovieBoxResolver, setupReason?: MovieBoxSetupReason) {
+  const reason = isMovieBoxSetupReason(setupReason) ? setupReason : undefined;
   return async (
     type: MediaType,
     tmdbId: string,
@@ -31,8 +33,11 @@ export function createSourceService(resolveMovieBox?: MovieBoxResolver) {
     }
     if (result.status === "ready" && !result.source) result = { status: "unavailable" };
     return {
-      version: 1,
-      moviebox: { status: result.status },
+      version: 2,
+      moviebox: {
+        status: result.status,
+        ...(result.status === "blocked_setup" && reason ? { reason } : {}),
+      },
       sources: [
         ...(result.status === "ready" && result.source ? [result.source] : []),
         ...getEmbedSources(type, tmdbId, params),
