@@ -1,6 +1,6 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink, LoaderCircle, MonitorPlay, RefreshCw } from "lucide-react";
+import { ExternalLink, LoaderCircle, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { MediaType } from "@/features/details/types";
 import { watchSourcesOptions } from "../queries";
@@ -24,6 +24,8 @@ interface WatchPlayerProps {
   season: number;
   episode: number;
   title: string;
+  /** The length published for this title, when there is one; a stream cannot report its own. */
+  durationSeconds?: number;
   episodeControls?: ReactNode;
 }
 
@@ -35,12 +37,11 @@ export const WatchPlayer = (props: WatchPlayerProps) => {
 };
 
 const OwnedWatchPlayer = ({
-  mediaType, mediaId, season, episode, title, episodeControls, preferredProvider, onProviderPreference,
+  mediaType, mediaId, season, episode, title, durationSeconds, episodeControls, preferredProvider, onProviderPreference,
 }: WatchPlayerProps & { preferredProvider?: string; onProviderPreference: (provider: string) => void }) => {
   const [attempt, setAttempt] = useState(0);
   const [discoveryOwner, setDiscoveryOwner] = useState(createDiscoveryOwner);
   const [committed, setCommitted] = useState<DirectSource>();
-  const unavailableId = useId();
   const query = useQuery({
     ...watchSourcesOptions(mediaType, mediaId, season, episode, discoveryOwner),
     throwOnError: false,
@@ -58,9 +59,12 @@ const OwnedWatchPlayer = ({
   // unmount the active session. Provider selection explicitly releases it.
   if (!committed && candidate?.type === "direct") setCommitted(candidate);
   useEffect(() => {
-    // Synthetic fallback must not claim the default preference: a manual retry
-    // can still choose a verified MovieBox source unless the viewer selected one.
-    if (preferredProvider === undefined && source && query.data && !query.isError) onProviderPreference(source.provider);
+    // Only a verified direct source claims the default preference. Latching whichever candidate
+    // happens to be first would pin the viewer to an embed fallback for the whole session, and a
+    // later MovieBox success for the same title would then be discovered but never played.
+    if (preferredProvider === undefined && source?.type === "direct" && query.data && !query.isError) {
+      onProviderPreference(source.provider);
+    }
   }, [preferredProvider, source, query.data, query.isError, onProviderPreference]);
 
   return (
@@ -77,6 +81,7 @@ const OwnedWatchPlayer = ({
             key={`${identity}:${source.provider}:${attempt}`}
             source={source}
             title={title}
+            durationSeconds={durationSeconds}
           />
         ) : (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 text-center text-sm text-neutral-400" role="status">
@@ -116,9 +121,18 @@ const OwnedWatchPlayer = ({
           </Button>
         </div>
       ) : null}
-      <p role="status" className={`px-1 text-xs ${moviebox.available ? "text-neutral-400" : "text-amber-300"}`}>
-        {moviebox.message}
-      </p>
+      <div className="flex flex-wrap items-center gap-2 px-1">
+        <p role="status" className={`text-xs ${moviebox.available ? "text-neutral-400" : "text-amber-300"}`}>
+          {moviebox.message}
+        </p>
+        {moviebox.retryable ? (
+          // A fresh owner is a fresh discovery session: the previous answer was one the same
+          // request can answer differently, so asking again is a real attempt, not a re-render.
+          <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => setDiscoveryOwner(createDiscoveryOwner())}>
+            <RefreshCw aria-hidden="true" className="size-4" /> Check MovieBox again
+          </Button>
+        ) : null}
+      </div>
 
       <details className="group rounded-lg text-xs text-neutral-500">
         <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-lg px-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400">
@@ -137,11 +151,8 @@ const OwnedWatchPlayer = ({
                 </a>
               </Button>
             ) : null}
-            <Button type="button" variant="outline" size="sm" className="min-h-11" disabled aria-describedby={unavailableId}>
-              <MonitorPlay aria-hidden="true" className="size-4" /> Open in video app
-            </Button>
           </div>
-          <p id={unavailableId}>Device video-app launching is not supported yet. Embed pages are not direct video files, and a web stream URL does not guarantee default-app support.</p>
+          <p>Playing a direct stream in a video app on the machine running the backend is offered in the player&rsquo;s own settings, next to the stream&rsquo;s quality and audio, because that is where the stream being played is known.</p>
           <p>Some providers reject sandboxed playback. Try another source or open the selected provider in a new tab. External pages are outside this player’s sandbox and may show ads, popups, or redirects. Playback is not guaranteed.</p>
         </div>
       </details>

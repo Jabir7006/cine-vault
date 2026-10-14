@@ -72,6 +72,17 @@ const unique = <T>(values: T[], key: (item: T) => string): void => {
   if (new Set(values.map(key)).size !== values.length) invalid();
 };
 
+const heights = (value: unknown): number[] => {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 32) return invalid();
+  const ladder = Array.from(value, (rung) => {
+    if (typeof rung !== "number" || !Number.isSafeInteger(rung) || rung < 144 || rung > 8_192) return invalid();
+    return rung;
+  });
+  // A ladder is what a rung is chosen from, so a repeated rung would offer the same stream twice.
+  if (new Set(ladder).size !== ladder.length) return invalid();
+  return ladder;
+};
+
 const parseQuality = (value: unknown): DirectQuality => {
   const item = record(value);
   const quality: DirectQuality = { id: id(item.id), label: text(item.label), url: capabilityPath(item.url) };
@@ -79,6 +90,14 @@ const parseQuality = (value: unknown): DirectQuality => {
     if (typeof item.height !== "number" || !Number.isSafeInteger(item.height) || item.height < 1 || item.height > 16_384) return invalid();
     quality.height = item.height;
   }
+  // An adaptive quality without its ladder cannot be offered rungs from, so it is malformed.
+  if (item.stream !== undefined) {
+    if (item.stream !== "adapted" || item.heights === undefined) return invalid();
+    quality.stream = "adapted";
+    quality.heights = heights(item.heights);
+    // The height that identifies this descriptor is the top of its own ladder.
+    if (quality.height !== undefined && !quality.heights.includes(quality.height)) return invalid();
+  } else if (item.heights !== undefined) return invalid();
   // Progressive resources are manual choices, never an invented adaptive mode.
   if (quality.label.toLowerCase() === "auto") return invalid();
   return quality;

@@ -10,6 +10,32 @@ export interface DirectQuality {
   label: string;
   url: string;
   height?: number;
+  /**
+   * `adapted` marks the signed adaptive manifest rather than a progressive file. It is still one
+   * descriptor and one URL, but a browser cannot read it: this quality plays through the player
+   * lease's transcode, while a native player on this host opens the manifest as it is.
+   */
+  stream?: "adapted";
+  /** The ladder an adapted manifest advertises, in its own order; a rung is chosen from it. */
+  heights?: number[];
+}
+
+/**
+ * The long-lived lease a title plays through.
+ *
+ * A capability lasts minutes and a film does not, so both the browser's transcode and a native
+ * player are pointed at a lease instead: one stable URL whose authorization is replaced behind it.
+ * Only programs on this host are served by it, which is why the origin is always loopback.
+ */
+export interface PlayerLease {
+  base: string;
+  origin: string;
+  expiresAt: number;
+  ladder: number[];
+  /** Whether this host has the encoder the browser path needs. */
+  encoder: boolean;
+  /** The native player that would be launched, if one is installed. */
+  native: string | null;
 }
 
 export interface DirectAudio {

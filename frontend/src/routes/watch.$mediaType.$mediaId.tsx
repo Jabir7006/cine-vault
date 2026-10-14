@@ -10,8 +10,8 @@ import type { MediaType } from "@/features/details/types";
 import { WatchPage } from "@/features/watch/components/WatchPage";
 
 interface WatchSearch {
-  s: number;
-  e: number;
+  s?: number;
+  e?: number;
 }
 
 const toMediaType = (raw: string): MediaType => {
@@ -32,9 +32,11 @@ const episodeParam = (raw: unknown, max: number): number => {
 };
 
 export const Route = createFileRoute("/watch/$mediaType/$mediaId")({
+  // Season and episode are part of a series URL only. A film has neither, so an absent pair stays
+  // absent in the address instead of being materialized as ?s=1&e=1 on every movie link.
   validateSearch: (search: Record<string, unknown>): WatchSearch => ({
-    s: episodeParam(search.s, 99),
-    e: episodeParam(search.e, 9999),
+    ...(search.s === undefined ? {} : { s: episodeParam(search.s, 99) }),
+    ...(search.e === undefined ? {} : { e: episodeParam(search.e, 9999) }),
   }),
   beforeLoad: ({ params }) => {
     toMediaType(params.mediaType);
@@ -88,8 +90,8 @@ function WatchRoute() {
         <WatchPage
           mediaType={mediaType}
           mediaId={mediaId}
-          season={s}
-          episode={e}
+          season={s ?? 1}
+          episode={e ?? 1}
           onChangeEpisode={(season, episode) =>
             navigate({
               search: (previous) => ({ ...previous, s: season, e: episode }),

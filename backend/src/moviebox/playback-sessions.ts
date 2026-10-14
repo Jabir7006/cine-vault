@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { MediaRegistry, MediaResource } from "../media/types";
+import type { PlayerAuthorizer } from "../media/player";
 import type { DirectSource, MediaType } from "../providers/types";
 import type { EpisodeSelection } from "./metadata";
 import type { TitleIdentity } from "./tmdb";
@@ -81,6 +82,11 @@ export interface PlaybackSessions {
   state(sessionId: string, token: string): StateReply;
   prepare(sessionId: string, token: string, input: PrepareInput, signal?: AbortSignal): Promise<PreparedReply>;
   commit(sessionId: string, token: string, input: CommitInput): CommittedReply;
+  /**
+   * A re-authorizing source for the committed audio of this session, which a player lease holds for
+   * as long as a title runs. The lease, not the session, decides when a fresh authorization is due.
+   */
+  player(sessionId: string, token: string): PlayerAuthorizer;
 }
 
 /** Equality is representation evidence, not a resource-ID or timeline guess. */
@@ -95,6 +101,11 @@ function sameResource(a: MediaResource | undefined, b: MediaResource | undefined
 export function createPlaybackSessions(options: {
   registry: MediaRegistry;
   refresh(binding: PlaybackBinding, signal: AbortSignal): Promise<PrivateDiscovery | undefined>;
+  /**
+   * Builds the authorization source a player lease re-negotiates through. Absent means this
+   * deployment offers no player lease, and a request for one is refused rather than half-served.
+   */
+  authorizer?(binding: PlaybackBinding, audioSubject: string): PlayerAuthorizer;
   now?: () => number;
 }): PlaybackSessions {
   const now = options.now ?? Date.now;
@@ -160,7 +171,18 @@ export function createPlaybackSessions(options: {
       const resource = owned[index]!;
       const id = session.committed?.source.qualities.find((quality) => quality.height === resource.height)?.id ?? opaque();
       videos.set(id, structuredClone(resource));
-      return { id, label: `${resource.height}p`, height: resource.height, url: `/media/${batch.tokens[index]}` };
+      const url = `/media/${batch.tokens[index]}`;
+      if (resource.kind === "manifest") {
+        // One entry per stream, not per rendition: the manifest carries its own ladder. The label is
+        // distinct from a progressive file's because both can be offered at the same height.
+        const ladder = resource.heights ?? [];
+        return {
+          id, url, height: resource.height, stream: "adapted" as const,
+          label: ladder.length ? `Adaptive ${ladder.join("/")}p` : "Adaptive",
+          ...(ladder.length ? { heights: [...ladder] } : {}),
+        };
+      }
+      return { id, label: `${resource.height}p`, height: resource.height, url };
     });
     const audios = [...session.audios].filter(([, member]) => discovery.audios.some((audio) => audio.subjectId === member.subjectId))
       .map(([id, member]) => ({ id, label: member.label, lang: member.lang }));
@@ -255,6 +277,13 @@ export function createPlaybackSessions(options: {
       session.retired.push(session.committed); session.committed = pending.generation; session.pending = undefined;
       session.controlExpiry = Math.min(session.absoluteExpiry, session.committed.source.expiresAt + 30000);
       return { version: 1, kind: "committed", source: publicSource(session, session.committed, token), pending: null };
+    },
+    player(id, token) {
+      const session = authenticate(id, token);
+      if (!options.authorizer) throw new PlaybackError("unavailable", 503);
+      // The lease follows the committed generation's audio, so a lease opened before an audio switch
+      // keeps playing the audio that was actually committed at the time it was opened.
+      return options.authorizer(session.binding, session.committed.audioSubject);
     },
   };
 }

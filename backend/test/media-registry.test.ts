@@ -245,9 +245,26 @@ test("descriptors reject unsafe URL shape, unsupported kinds and malformed metad
       (error: unknown) => error instanceof Error && !error.message.includes(url));
   }
   assert.ok(registry.register(resource({ url: "https://media.example.test:443/x" }), NOW + 120_000));
-  for (const overrides of [{ kind: "manifest" }, { expiresAt: NaN }, { height: -1 }, { height: 1.5 }, { captionFormat: "ass" },
+  for (const overrides of [{ kind: "playlist" }, { expiresAt: NaN }, { height: -1 }, { height: 1.5 }, { captionFormat: "ass" },
     { headers: { Cookie: "value\r\nInjected: yes" } }, { headers: { "bad name": "value" } },
     { headers: { Cookie: "a".repeat(16_385) } }, { label: "a".repeat(1_025) }, { codec: {} }]) {
     assert.throws(() => registry.register(resource(overrides as Partial<MediaResource>), NOW + 120_000));
+  }
+});
+
+test("a manifest descriptor carries its ladder and nothing else may claim one", () => {
+  const { registry } = fixture();
+  const manifest = registry.register(resource({ kind: "manifest", height: 1080, heights: [1080, 720, 480] }), NOW + 120_000);
+  const owned = registry.resolve(manifest, "GET");
+  assert.equal(owned?.kind, "manifest");
+  assert.deepEqual(owned?.heights, [1080, 720, 480]);
+  assert.ok(Object.isFrozen(owned?.heights));
+  // A ladder belongs to a manifest, and is always a short list of real video heights.
+  for (const overrides of [{ kind: "manifest" }, { kind: "manifest", heights: [] }, { kind: "manifest", heights: [1080, 1080] },
+    { kind: "manifest", heights: [12] }, { kind: "manifest", heights: [1080.5] }, { kind: "manifest", heights: ["1080"] },
+    { kind: "manifest", heights: Array.from({ length: 33 }, (_value, index) => 144 + index) },
+    { heights: [1080] }, { kind: "subtitle", heights: [1080] }]) {
+    assert.throws(() => registry.register(resource(overrides as Partial<MediaResource>), NOW + 120_000),
+      /Invalid media registry/, JSON.stringify(overrides).slice(0, 60));
   }
 });

@@ -74,7 +74,8 @@ export function createDeviceIdentity(): DeviceIdentity {
 
 export function signedHeaders(key: Uint8Array, identity: DeviceIdentity, method: string,
   url: string, body: string | undefined, timestampMs: number, token?: string): Record<string, string> {
-  const [a, b, c, d] = randomBytes(4);
+  // Defaults keep the octets total under noUncheckedIndexedAccess; four bytes are always returned.
+  const [a = 0, b = 0, c = 0, d = 0] = randomBytes(4);
   const spoofedIp = `${10 + (a % 100)}.${b % 256}.${c % 256}.${d % 256}`;
   const headers: Record<string, string> = {
     "user-agent": identity.userAgent, accept: "application/json", "content-type": "application/json",

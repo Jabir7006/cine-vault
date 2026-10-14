@@ -6,6 +6,9 @@ export interface MovieBoxRuntimeConfig {
   readonly mediaHosts: readonly string[];
   readonly captionHosts: readonly string[];
   readonly tmdb: { readonly apiKey: string; readonly baseUrl: string };
+  /** Both are optional: absent means the built-in defaults for the external programs. */
+  readonly ffmpegPath?: string;
+  readonly nativePlayers?: readonly string[];
 }
 
 const setupReasons: ReadonlySet<string> = new Set([

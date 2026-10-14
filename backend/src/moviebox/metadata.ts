@@ -12,8 +12,10 @@ export interface SubjectIdentity {
 }
 export interface SeasonMetadata {
   se: number;
+  /** Explicit episode numbers. Authoritative when non-empty; empty means the season was
+   *  reported without a list, and `maxEp` is then the upper bound of its episodes. */
   episodeNumbers: number[];
-  /** Listing metadata only; never evidence that 1..maxEp exists. */
+  /** Highest available episode in the season, as reported by MovieBox. */
   maxEp?: number;
 }
 export interface DubMetadata extends SubjectIdentity {
@@ -138,7 +140,7 @@ function yearField(row: Record<string, unknown>): number | undefined {
  * resolution suffixes, language suffixes and trailing brackets/years that would
  * prevent an exact title match against TMDB metadata.
  */
-export function cleanMovieBoxTitle(rawTitle: string): string {
+export function cleanMovieBoxTitle(rawTitle: string, options?: { keepParenthetical?: boolean }): string {
   let title = rawTitle.trim();
   if (!title) return "";
 
@@ -158,8 +160,10 @@ export function cleanMovieBoxTitle(rawTitle: string): string {
 
   // Strip parenthesized non-year suffixes (e.g. "Movie (Director's Cut)").
   // A 4-digit year inside parentheses is kept (e.g. "Inception (2010)").
+  // callers that compare two titles for identity pass keepParenthetical, because a
+  // qualifier such as "(Part 2)" changes which title is meant.
   const parenPos = title.indexOf("(");
-  if (parenPos > 0) {
+  if (!options?.keepParenthetical && parenPos > 0) {
     const inside = title.slice(parenPos + 1).split(")")[0] ?? "";
     const isYear = /^\d{4}$/.test(inside) && parseInt(inside, 10) >= 1900 && parseInt(inside, 10) <= 2099;
     if (!isYear) title = title.slice(0, parenPos).trim();
@@ -178,8 +182,9 @@ export function cleanMovieBoxTitle(rawTitle: string): string {
     if (isTag) title = title.slice(0, dashPos).trim();
   }
 
-  // Strip trailing " S{number}" (e.g. "Breaking Bad S01" -> "Breaking Bad").
-  const sMatch = title.match(/ S(\d[\d-]*)$/);
+  // Strip a trailing season marker: " S01", and multi-season ranges such as " S1-S9" that an
+  // omnibus upload uses to advertise every season it covers.
+  const sMatch = title.match(/ S(\d[\d\-S]*)$/);
   if (sMatch) {
     title = title.slice(0, sMatch.index).trim();
   }
@@ -241,6 +246,18 @@ export function parseSearchSubjects(value: unknown): SubjectIdentity[] {
   return containers.flatMap((items) => items.flatMap((item) => { const parsed = identity(item); return parsed ? [parsed] : []; }));
 }
 
+/**
+ * `allEp` carries the same explicit episode list as `episodeNumbers`, but as a comma-separated
+ * string ("1,2,4,5,6,7") — a season with a mid-season gap lists exactly what exists, which is
+ * more precise than the `maxEp` upper bound. A malformed or empty value simply yields no list.
+ */
+function episodeList(value: unknown): number[] {
+  if (typeof value !== "string") return [];
+  const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
+  if (!parts.length || parts.length > MAX_EPISODE) return [];
+  const numbers = parts.map((part) => integer(part, MAX_EPISODE));
+  return numbers.every((number) => number !== undefined) ? numbers as number[] : [];
+}
 export function parseSeasonInfo(value: unknown): SeasonMetadata[] {
   const root = record(value);
   if (!root && !Array.isArray(value)) return malformed();
@@ -252,7 +269,8 @@ export function parseSeasonInfo(value: unknown): SeasonMetadata[] {
     const row = record(value);
     const se = integer(row?.se, MAX_EPISODE);
     if (!row || se === undefined) return malformed();
-    const episodeNumbers = row.episodeNumbers === undefined ? [] : list(row.episodeNumbers, MAX_EPISODE).map((ep) => {
+    // A structured list wins over the string form; either is authoritative when present.
+    const episodeNumbers = row.episodeNumbers === undefined ? episodeList(row.allEp) : list(row.episodeNumbers, MAX_EPISODE).map((ep) => {
       const parsed = integer(ep, MAX_EPISODE);
       return parsed === undefined ? malformed() : parsed;
     });
@@ -310,9 +328,14 @@ function stream(value: unknown): PrivateStreamMetadata | undefined {
   const rawUrl = row.url ?? row.resourceLink ?? row.streamUrl;
   const url = privateUrl(rawUrl);
   if (rawUrl !== undefined && !url) return;
-  const se = row.se === undefined ? undefined : integer(row.se, MAX_EPISODE);
-  const ep = row.ep === undefined ? undefined : integer(row.ep, MAX_EPISODE);
+  // A film is addressed by the API as season 0 / episode 0, so zero is a valid coordinate meaning
+  // "no episode" and must parse; only an unparseable or out-of-range value discards the row.
+  const se = row.se === undefined ? undefined : integer(row.se, MAX_EPISODE, 0);
+  const ep = row.ep === undefined ? undefined : integer(row.ep, MAX_EPISODE, 0);
   if ((row.se !== undefined || row.ep !== undefined) && (se === undefined || ep === undefined)) return;
+  // Season and episode are a pair: a film reports 0/0 and an episode reports its own non-zero
+  // coordinates. A half-zero pair addresses neither, so it is not evidence of anything.
+  if (se !== undefined && ep !== undefined && (se === 0) !== (ep === 0)) return;
   const rawResolutions = row.resolutions === undefined ? [] : Array.isArray(row.resolutions) ? row.resolutions :
     typeof row.resolutions === "string" && row.resolutions.length <= 256 ? row.resolutions.split(",") : malformed();
   const resolutions = list(rawResolutions, 32).map((height) => {
@@ -372,16 +395,33 @@ export function parseCaptions(value: unknown): PrivateCaptionMetadata[] {
   });
 }
 
+/**
+ * MovieBox answers a stream request it will not serve with a downgrade advertisement instead of the
+ * title itself: a ~23-second "App Upgrade Notice" clip from the media host's catch-all bucket. Its
+ * row still advertises the title's real size and duration, so only the location gives it away — and
+ * playing it presents an advertisement as the requested title. The path markers cover the retired
+ * variants; the bucket rule covers the file the API currently points every unserved title at.
+ */
+export function isNoticePath(host: string | undefined, path: string): boolean {
+  if (/(?:^|[\/_.-])(?:notice|deprecated|deprecation)(?:[\/_.-]|$)/u.test(path)) return true;
+  return host === "macdn.aoneroom.com" && path.includes("/other/") && /\.(?:mp4|mkv|m3u8)$/u.test(path);
+}
+
 /** Pure hints only: even an MP4 extension/label needs independent media/container verification. */
 export function classifyStream(resource: Pick<PrivateStreamMetadata, "url" | "format" | "requiresVerification" | "signCookie" | "policy" | "cookie">): StreamClassification {
   let path: string | undefined;
+  let host: string | undefined;
   if (resource.url !== undefined) {
     if (!privateUrl(resource.url)) return { status: "unsupported_format", reason: "invalid_url" };
     // Decode the path only for marker detection. Never decode cookies, policy or query data.
-    try { path = decodeURIComponent(new URL(resource.url).pathname).toLowerCase(); }
+    try {
+      const parsed = new URL(resource.url);
+      path = decodeURIComponent(parsed.pathname).toLowerCase();
+      host = parsed.hostname.toLowerCase();
+    }
     catch { return { status: "unsupported_format", reason: "invalid_url" }; }
   }
-  if (path && /(?:^|[\/_.-])(?:notice|deprecated|deprecation)(?:[\/_.-]|$)/u.test(path)) return { status: "unsupported_format", reason: "notice" };
+  if (path && isNoticePath(host, path)) return { status: "unsupported_format", reason: "notice" };
   if (path && (path.includes("/dash/") || path.endsWith(".mpd"))) return { status: "unsupported_adaptive", reason: "dash" };
   if (path && (path.includes("/hls/") || path.endsWith(".m3u8"))) return { status: "unsupported_adaptive", reason: "hls" };
   if (resource.requiresVerification || resource.signCookie !== undefined || resource.policy !== undefined || resource.cookie !== undefined) return { status: "unverified", reason: "signed_policy" };

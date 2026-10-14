@@ -5,6 +5,8 @@ import { TransportError } from "../media/transport";
 import { emitMovieBoxDiagnostic, movieBoxFailure, projectDiscoveryFailure } from "./diagnostics";
 import type { DiagnosticStage, DiscoveryFailure, MovieBoxDiagnosticCallback } from "./diagnostics";
 import type { MediaProbeEvidence, MediaResource, MediaRegistry, MediaTransport } from "../media/types";
+import type { PlayerAuthorizer } from "../media/player";
+import { streamManifestUrl } from "../media/dash";
 import { MovieBoxMetadata, classifyStream } from "./metadata";
 import { MovieBoxError } from "./errors";
 import type { DubMetadata, PrivateStreamMetadata, SubjectDetail } from "./metadata";
@@ -17,6 +19,8 @@ type DiscoveryResult = { status: MovieBoxStatus; discovery?: PrivateDiscovery };
 interface WorkContext {
   signal: AbortSignal; deadline: number; tasks: Set<Promise<unknown>>;
   stage: DiagnosticStage; failure?: DiscoveryFailure;
+  /** Every play-info answer offered only the downgrade advertisement, with no authorization on it. */
+  advertisementOnly?: true;
 }
 const safeLabel = (value: string | undefined): value is string => typeof value === "string" && value.length > 0 && value.length <= 120 && !/[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]/u.test(value);
 const safeLanguage = (value: string | undefined): value is string => typeof value === "string" && value.length <= 35 && /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(value);
@@ -29,8 +33,18 @@ export function createMovieBoxResolver(options: {
   transport: MediaTransport;
   now?: () => number;
   diagnostic?: MovieBoxDiagnosticCallback;
+  /**
+   * How many times one play-info listing is asked for while it returns only the downgrade
+   * advertisement. Optional; the default is the number of independently measured attempts that
+   * makes an unserved title rare without giving a genuinely unavailable one an unbounded cost.
+   */
+  playInfoAttempts?: number;
 }): MovieBoxResolver & { playback: PlaybackSessions } {
   const now = options.now ?? Date.now;
+  const playInfoAttempts = options.playInfoAttempts ?? 4;
+  if (!Number.isSafeInteger(playInfoAttempts) || playInfoAttempts < 1 || playInfoAttempts > 8) {
+    throw new Error("Invalid moviebox resolver configuration");
+  }
   const mappings = new Map<string, { binding: PlaybackBinding; subject: SubjectDetail; expiresAt: number }>();
   const results = new Map<string, { result: DiscoveryResult; expiresAt: number }>();
   const flights = new Map<string, { result: Promise<DiscoveryResult>; settled: boolean }>();
@@ -65,7 +79,9 @@ export function createMovieBoxResolver(options: {
     for (let page = 1; page <= 2; page++) {
       if (context.signal.aborted) return { status: "unavailable" };
       try {
-        const result = await track(context, metadata.resources(subject.subjectId, { page, perPage: 30, selection: binding.selection }));
+        // perPage is capped by the API at the value the reference client uses: a larger page is
+        // rejected outright, which would silently leave play-info's notice clip as the only stream.
+        const result = await track(context, metadata.resources(subject.subjectId, { page, perPage: 20, selection: binding.selection }));
         resources.push(...result.resources);
         if (!result.hasMore) break;
       } catch (error) {
@@ -86,9 +102,30 @@ export function createMovieBoxResolver(options: {
     }
     context.stage = "play_info";
     let playInfoFailure: DiscoveryFailure | undefined;
-    const streams = await track(context, metadata.playInfo(subject.subjectId, binding.selection)).catch((error) => {
-      playInfoFailure = movieBoxFailure("play_info", error); return [];
-    });
+    const readPlayInfo = (): Promise<PrivateStreamMetadata[]> =>
+      track(context, metadata.playInfo(subject.subjectId, binding.selection)).catch((error) => {
+        playInfoFailure = movieBoxFailure("play_info", error); return [];
+      });
+    /**
+     * The downgrade advertisement on its own, with no authorization to the title behind it.
+     *
+     * The API answers the same request either with this row or with the same row carrying the
+     * authorization that names the signed manifest. Only the version without it cannot play, and
+     * nothing about the request predicts which one comes back — measured over repeated identical
+     * requests, roughly one in three carried the authorization. Asking again is therefore the whole
+     * remedy; a listing that offers anything else is taken as it is.
+     */
+    const isUnserved = (rows: readonly PrivateStreamMetadata[]): boolean =>
+      rows.length > 0 && rows.every((row) => {
+        const classification = classifyStream(row);
+        return classification.status === "unsupported_format" && classification.reason === "notice";
+      }) && !rows.some((row) => streamManifestUrl(row) !== undefined);
+    let streams = await readPlayInfo();
+    for (let attempt = 1; attempt < playInfoAttempts && isUnserved(streams) && !context.signal.aborted &&
+      performance.now() < context.deadline; attempt++) {
+      streams = await readPlayInfo();
+    }
+    if (isUnserved(streams)) context.advertisementOnly = true;
     const selection = binding.selection;
     if (selection && !episodeVerified && !hasEpisodeEvidence(selection, [], streams)) {
       context.failure = playInfoFailure ?? { stage: "episode", code: "episode_evidence_missing" };
@@ -107,6 +144,46 @@ export function createMovieBoxResolver(options: {
     let streamFailure: DiscoveryFailure | undefined;
     let formatFailure: DiscoveryFailure | undefined;
     const streamPriority = ["codec_missing", "codec_unsupported", "height_missing", "format", "missing_url", "unknown"] as const;
+    /**
+     * The real content behind a downgrade row.
+     *
+     * When the API decides not to serve a title it points every row at a notice clip, so the row's own
+     * URL is worthless — but its authorization still names the signed manifest that carries the title,
+     * and that manifest is verified here before it is offered. One descriptor covers the whole stream:
+     * the manifest holds the video ladder and the audio together, so it joins the qualities as a single
+     * adaptive entry rather than one entry per rendition.
+     */
+    const loadManifest = async (): Promise<MediaResource | undefined> => {
+      const candidatesWithAuthorization = candidates.slice(0, 8).flatMap((candidate) => {
+        const url = streamManifestUrl(candidate);
+        return url === undefined ? [] : [{ candidate, url }];
+      });
+      const attempted = new Set<string>();
+      for (const { candidate, url } of candidatesWithAuthorization) {
+        if (context.signal.aborted) return undefined;
+        if (attempted.has(url) || seen.has(url)) continue;
+        attempted.add(url);
+        const headers: Record<string, string> = { ...candidate.headers };
+        const cookie = candidate.signCookie ?? candidate.cookie;
+        if (cookie !== undefined) headers.cookie = cookie;
+        const resource: MediaResource = { url, kind: "manifest", headers, expiresAt: candidate.expiresAt };
+        if (!options.transport.readManifest) continue;
+        context.stage = "media_probe";
+        const manifest = await budget(context, 8000, (signal) => options.transport.readManifest!(resource, signal));
+        if (manifest === undefined || !manifest.heights.length) {
+          // Authorized but unusable: reported as a media probe, never as an unplayable format.
+          probeFailure ??= { stage: "media_probe", code: "probe_rejected" };
+          unverified = true;
+          continue;
+        }
+        resource.heights = [...manifest.heights];
+        // Sorting and quality identity key on one height; the ladder itself is carried alongside.
+        resource.height = Math.max(...manifest.heights);
+        seen.add(url);
+        return resource;
+      }
+      return undefined;
+    };
     // Status precedence is unchanged. Prefer attempted probes to skipped streams,
     // concrete probe evidence to generic rejection, then first observed within a category.
     context.stage = "stream";
@@ -174,6 +251,10 @@ export function createMovieBoxResolver(options: {
       }
       seen.add(candidate.url!); heights.add(candidate.height!); videos.push(resource);
     }
+    // A verified manifest is offered alongside any progressive file, never instead of it: a browser
+    // cannot decode the ladder's HEVC, while a native player would rather have the whole stream.
+    const manifest = await loadManifest();
+    if (manifest) videos.push(manifest);
     if (!videos.length) {
       context.failure = adaptive ? adaptiveFailure : unverified ? probeFailure ?? streamFailure :
         formatFailure ?? playInfoFailure ?? resourceFailure ?? { stage: "stream", code: "no_candidates" };
@@ -206,33 +287,11 @@ export function createMovieBoxResolver(options: {
     return { status: "ready", audio: { subjectId: subject.subjectId, label, lang, videos, captions } };
   };
   const relationshipMatches = (dub: DubMetadata, target: TitleIdentity) => identityMatches(dub, target);
-  const discover = async (type: MediaType, id: string, params: ResolveParams, context: WorkContext, bound?: PlaybackBinding): Promise<DiscoveryResult> => {
-    const metadata = options.metadata(context.signal);
-    const mappingKey = `${type}:${id}`;
-    let entry = !bound ? mappings.get(mappingKey) : undefined;
-    let target = bound?.target ?? entry?.binding.target;
-    let subject = entry?.subject;
-    if (bound) {
-      context.stage = "detail";
-      subject = await track(context, metadata.detail(bound.subjectId));
-      if (!subject || subject.subjectId !== bound.subjectId || !identityMatches(subject, bound.target)) {
-        context.failure = { stage: "detail", code: !subject ? "detail_missing" : "detail_mismatch" }; return { status: "unverified" };
-      }
-    } else if (!subject) {
-      context.stage = "tmdb";
-      target = await track(context, options.lookup(type, id, context.signal));
-      if (!target) { context.failure = { stage: "tmdb", code: "no_target" }; return { status: "unverified" }; }
-      context.stage = "matching";
-      const matched = await track(context, matchMovieBoxSubject(metadata, target, (failure) => { context.failure = failure; }));
-      if (matched.status !== "matched") return matched;
-      subject = matched.subject;
-    }
-    if (!target || !subject || context.signal.aborted) return { status: "unavailable" };
+  /** Full discovery for one already-identified subject; "ready" still requires verified media. */
+  const completeDiscovery = async (type: MediaType, id: string, params: ResolveParams, context: WorkContext,
+    target: TitleIdentity, subject: SubjectDetail, bound?: PlaybackBinding): Promise<DiscoveryResult> => {
     const binding: PlaybackBinding = { type, tmdbId: id, target: structuredClone(target), subjectId: subject.subjectId,
       selection: type === "tv" ? { season: params.season ?? 1, episode: params.episode ?? 1 } : undefined };
-    if (!bound) {
-      mappings.set(mappingKey, { binding, subject: structuredClone(subject), expiresAt: now() + 1800000 }); prune();
-    }
     const canonical = await loadAudio(binding, subject, context, "Source audio", "und");
     if (!canonical.audio) return { status: canonical.status };
     const audios = [canonical.audio];
@@ -249,7 +308,7 @@ export function createMovieBoxResolver(options: {
       const audio = await budget(context, Math.min(1000, optionalDeadline - performance.now()), async (signal) => {
         const alternateContext: WorkContext = { ...context, signal, deadline: Math.min(optionalDeadline, performance.now() + 1000) };
         const detail = await track(context, options.metadata(signal).detail(subjectId));
-        if (!detail || detail.subjectId !== subjectId || !identityMatches(detail, target!)) return undefined;
+        if (!detail || detail.subjectId !== subjectId || !identityMatches(detail, target)) return undefined;
         // The alternate's requested TV episode is proven independently inside loadAudio.
         const verified = await loadAudio(binding, detail, alternateContext, dub.label!, dub.lang!, true);
         return verified.audio;
@@ -259,7 +318,50 @@ export function createMovieBoxResolver(options: {
     if (context.signal.aborted) return { status: "unavailable" };
     const deadlines = audios.flatMap((audio) => [...audio.videos, ...audio.captions]).flatMap((resource) => resource.expiresAt === undefined ? [] : [resource.expiresAt - 60000]);
     const expiresAt = Math.min(now() + 300000, ...deadlines);
+    // Only a subject that produced verified media becomes the refresh binding.
+    if (!bound) {
+      mappings.set(`${type}:${id}`, { binding, subject: structuredClone(subject), expiresAt: now() + 1800000 }); prune();
+    }
     return { status: "ready", discovery: { binding, audios, expiresAt } };
+  };
+  const discover = async (type: MediaType, id: string, params: ResolveParams, context: WorkContext, bound?: PlaybackBinding): Promise<DiscoveryResult> => {
+    const metadata = options.metadata(context.signal);
+    const mappingKey = `${type}:${id}`;
+    const entry = !bound ? mappings.get(mappingKey) : undefined;
+    let target = bound?.target ?? entry?.binding.target;
+    let subjects: SubjectDetail[];
+    if (bound) {
+      context.stage = "detail";
+      const subject = await track(context, metadata.detail(bound.subjectId));
+      if (!subject || subject.subjectId !== bound.subjectId || !identityMatches(subject, bound.target)) {
+        context.failure = { stage: "detail", code: !subject ? "detail_missing" : "detail_mismatch" }; return { status: "unverified" };
+      }
+      subjects = [subject];
+    } else if (entry) {
+      subjects = [entry.subject];
+    } else {
+      context.stage = "tmdb";
+      target = await track(context, options.lookup(type, id, context.signal));
+      if (!target) { context.failure = { stage: "tmdb", code: "no_target" }; return { status: "unverified" }; }
+      context.stage = "matching";
+      const matched = await track(context, matchMovieBoxSubject(metadata, target, (failure) => { context.failure = failure; }));
+      if (matched.status !== "matched") return matched;
+      // Duplicate uploads agree on every search-visible field, so each is verified in turn.
+      subjects = [matched.subject, ...matched.alternates];
+    }
+    if (!target || !subjects.length || context.signal.aborted) return { status: "unavailable" };
+    let result: DiscoveryResult = { status: "unavailable" };
+    let firstFailure: DiscoveryFailure | undefined;
+    for (const subject of subjects) {
+      if (context.signal.aborted) break;
+      context.failure = undefined;
+      result = await completeDiscovery(type, id, params, context, target, subject, bound);
+      if (result.status === "ready") return result;
+      firstFailure ??= context.failure;
+    }
+    if (context.signal.aborted) return { status: "unavailable" };
+    context.failure ??= firstFailure;
+    return result;
   };
   const privateWork = (type: MediaType, id: string, params: ResolveParams, bound?: PlaybackBinding): Promise<DiscoveryResult> => {
     prune();
@@ -285,7 +387,12 @@ export function createMovieBoxResolver(options: {
       if (result.status !== "ready" && result.status !== "blocked_setup") {
         emitMovieBoxDiagnostic(options.diagnostic, { status: result.status, ...context.failure ?? { stage: context.stage, code: "unknown" } });
       }
-      if (!bound && !controller.signal.aborted) {
+      // A refusal the advertisement caused is the one refusal a retry can reverse, and retrying is
+      // exactly what the viewer is offered — so it is not remembered, or the retry would be answered
+      // with the identical refusal for a quarter of a minute. Every other refusal is cached: one
+      // failing lookup is then neither repeated upstream nor logged once per caller.
+      const reversible = result.status === "unsupported_format" && context.advertisementOnly === true;
+      if (!bound && !controller.signal.aborted && !reversible) {
         results.set(key, { result: structuredClone(result), expiresAt: Math.min(now() + 15000, result.discovery ? result.discovery.expiresAt - 30000 : Infinity) }); prune();
       }
       return result;
@@ -305,6 +412,14 @@ export function createMovieBoxResolver(options: {
     refresh: async (binding, signal) => {
       const result = await awaitCaller(privateWork(binding.type, binding.tmdbId, binding.selection ?? {}, binding), signal);
       return result.discovery;
+    },
+    // A player lease outlives any single capability, so it re-authorizes through the same verified
+    // refresh path a renewal uses and can never be pointed at a subject that stopped matching.
+    authorizer: (binding, audioSubject): PlayerAuthorizer => async (signal) => {
+      const result = await awaitCaller(privateWork(binding.type, binding.tmdbId, binding.selection ?? {}, binding), signal);
+      if (signal.aborted) return undefined;
+      const audio = result.discovery?.audios.find((entry) => entry.subjectId === audioSubject) ?? result.discovery?.audios[0];
+      return audio?.videos.find((resource) => resource.kind === "manifest");
     },
   });
   const resolve: MovieBoxResolver = async (type, id, params, signal): Promise<MovieBoxResolution> => {

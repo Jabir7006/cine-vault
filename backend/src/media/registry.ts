@@ -6,7 +6,10 @@ export const MAX_MEDIA_TTL_MS = 10 * 60_000;
 export const UPSTREAM_EXPIRY_MARGIN_MS = 60_000;
 const DEFAULT_TTL_MS = 5 * 60_000;
 const MAX_CAPACITY = 10_000;
-const TOKEN_PATTERN = /^v1\.(video|subtitle)\.GET-HEAD\.([A-Za-z0-9_-]{32})\.([1-9]\d{0,15})\.([A-Za-z0-9_-]{43})$/;
+const RESOURCE_KINDS = new Set<MediaResource["kind"]>(["video", "subtitle", "manifest"]);
+const isResourceKind = (value: unknown): value is MediaResource["kind"] =>
+  typeof value === "string" && RESOURCE_KINDS.has(value as MediaResource["kind"]);
+const TOKEN_PATTERN = /^v1\.(video|subtitle|manifest)\.GET-HEAD\.([A-Za-z0-9_-]{32})\.([1-9]\d{0,15})\.([A-Za-z0-9_-]{43})$/;
 
 export interface MediaRegistryOptions {
   /** Operator-supplied 64 hex characters, or at least 32 bytes; no default key. */
@@ -33,7 +36,7 @@ function timestamp(value: number): number {
 }
 
 function copyResource(resource: MediaResource): MediaResource {
-  if (!resource || (resource.kind !== "video" && resource.kind !== "subtitle")) fail();
+  if (!resource || !isResourceKind(resource.kind)) fail();
   if (typeof resource.url !== "string" || resource.url.length > 16_384 ||
       !/^https:\/\//i.test(resource.url) || /[\s\\#]/u.test(resource.url)) fail();
   let url: URL;
@@ -68,6 +71,16 @@ function copyResource(resource: MediaResource): MediaResource {
       copy[field] = value;
     }
   }
+  // A manifest without a readable ladder is not something the relay can offer, and only a manifest
+  // has one at all: the ladder describes the single adaptive stream every one of its segments belongs to.
+  if (resource.kind === "manifest") {
+    const heights = resource.heights;
+    if (!Array.isArray(heights) || !heights.length || heights.length > 32 ||
+        heights.some((height) => !Number.isSafeInteger(height) || height < 144 || height > 8_192) ||
+        new Set(heights).size !== heights.length) fail();
+    copy.heights = Object.freeze([...heights]);
+  } else if (resource.heights !== undefined) fail();
+
   if (resource.captionFormat !== undefined) {
     if (resource.captionFormat !== "srt" && resource.captionFormat !== "vtt") fail();
     copy.captionFormat = resource.captionFormat;
@@ -182,7 +195,7 @@ export class MemoryMediaRegistry implements MediaRegistry {
     const match = TOKEN_PATTERN.exec(token);
     if (!match || match[0] !== token) return undefined;
     const [, kind, id, expiryText, signatureText] = match;
-    if (!id || !expiryText || !signatureText || (kind !== "video" && kind !== "subtitle")) return undefined;
+    if (!id || !expiryText || !signatureText || !isResourceKind(kind)) return undefined;
     const expiresAt = Number(expiryText);
     if (!Number.isSafeInteger(expiresAt) || String(expiresAt) !== expiryText) return undefined;
     const signature = Buffer.from(signatureText, "base64url");

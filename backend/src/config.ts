@@ -30,4 +30,8 @@ export const config = {
   captionHosts: env("MOVIEBOX_CAPTION_HOSTS").split(",").map((host) => host.trim()).filter(Boolean),
   /** Server-only runtime signing key; there is no built-in credential. */
   movieboxSecretHex: env("MOVIEBOX_SECRET_HEX"),
+  /** Browser playback needs H.264 this CDN does not serve, so it is produced here. */
+  ffmpegPath: env("FFMPEG_PATH", "ffmpeg"),
+  /** Native players to look for, in preference order, for "open in player". */
+  nativePlayers: env("NATIVE_PLAYERS", "mpv,vlc,celluloid,smplayer,totem").split(",").map((name) => name.trim()).filter(Boolean),
 } as const;

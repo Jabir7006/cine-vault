@@ -12,6 +12,11 @@ import type { MovieBoxDiagnostic, MovieBoxDiagnosticCallback } from "../src/movi
 const instant = 1_800_000_000_000;
 const subject = { subjectId: "9000000000000000001", title: "Synthetic Film", subjectType: 1, year: 2020 };
 const progressive = { resourceId: "101", resourceLink: "https://media.example.test/fixture.mp4", format: "MP4", codecName: "H264", resolution: 720 };
+/** The downgrade advertisement: the media host's catch-all bucket, which is all that gives it away. */
+const notice = { resourceId: "101", resourceLink: "https://macdn.aoneroom.com/other/2026/10/10/notice.mp4", format: "MP4", codecName: "HEVC", resolutions: "1080,720,480" };
+/** The same row carrying the authorization that names the signed manifest behind the title. */
+const authorizedNotice = (directory = "https://sbcdn3.example.test/dash/9f/film") =>
+  ({ ...notice, signCookie: `Edge-Cache-Cookie=urlprefix=${Buffer.from(directory).toString("base64url")}` });
 
 function fixture(options: {
   resources?: unknown[]; streams?: unknown[]; subject?: typeof subject; captionsFail?: boolean;
@@ -21,10 +26,16 @@ function fixture(options: {
   diagnostic?: MovieBoxDiagnosticCallback; noTarget?: boolean; searchRows?: unknown[]; detailRow?: unknown;
   resourcesError?: unknown; resourcesErrorPage?: number; resourcePages?: Array<{ resources: unknown[]; hasMore: boolean }>;
   playInfoError?: unknown; probeError?: unknown; probeEvidence?: MediaProbeEvidence;
+  /** One play-info listing per call; the last entry answers every request after it. */
+  streamsSequence?: unknown[][];
+  manifest?: (url: string) => { xml: string; heights: number[] };
+  playInfoAttempts?: number;
 } = {}) {
   let calls = 0;
   let probes = 0;
+  let playInfoCalls = 0;
   const paths: string[] = [];
+  const manifestReads: string[] = [];
   let clock = instant;
   const detail = { ...(options.subject ?? { ...subject, ...(options.tv ? { subjectType: 2, seasons: [{ se: 1, episodeNumbers: options.episodes ?? [] }] } : {}) }), dubs: options.dubs ?? [] };
   const registry = createMediaRegistry({ signingKey: "ab".repeat(32), now: () => clock });
@@ -46,8 +57,11 @@ function fixture(options: {
         return options.resourcePages?.[page - 1] ?? { resources: alternate ? options.alternateResources ?? [] : options.resources ?? [progressive], hasMore: false };
       }
       if (path.includes("/play-info/v2?")) {
+        playInfoCalls++;
         if (options.playInfoError) throw options.playInfoError;
         if (options.playInfoFail) throw new Error("Synthetic unavailable play-info");
+        const sequence = options.streamsSequence;
+        if (sequence?.length) return { streams: sequence[Math.min(playInfoCalls - 1, sequence.length - 1)] };
         return { streams: options.streams ?? [] };
       }
       if (options.captionsFail) throw new Error("private caption failure");
@@ -62,14 +76,22 @@ function fixture(options: {
       return options.probe ?? true;
     },
     ...(options.probeEvidence ? { probeEvidence: async () => { probes++; return options.probeEvidence!; } } : {}),
+    ...(options.manifest ? {
+      readManifest: async (resource: MediaResource) => { manifestReads.push(resource.url); return options.manifest!(resource.url); },
+    } : {}),
     caption: async () => options.slowCaption ? new Promise<string>(() => undefined) : "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nSynthetic caption\n",
     relay: async () => new Response(null),
   };
   const resolve = createMovieBoxResolver({
     now: () => clock, metadata: () => metadata, registry, transport, diagnostic: options.diagnostic,
+    playInfoAttempts: options.playInfoAttempts,
     lookup: async () => options.noTarget ? undefined : ({ type: options.tv ? "tv" : "movie", titles: ["Synthetic Film"], year: 2020 }),
   });
-  return { resolve, registry, paths, get calls() { return calls; }, get probes() { return probes; }, tick: (ms: number) => { clock += ms; } };
+  return {
+    resolve, registry, paths, manifestReads,
+    get calls() { return calls; }, get probes() { return probes; }, get playInfoCalls() { return playInfoCalls; },
+    tick: (ms: number) => { clock += ms; },
+  };
 }
 
 test("verified progressive is primary-ready with no upstream URLs, IDs or headers in public contract", async () => {
@@ -110,6 +132,66 @@ test("MP4-labelled DASH and policy resources do not get probed or minted", async
   const signedFail = fixture({ resources: [{ ...progressive, signCookie: "Edge-Cache-Cookie=synthetic" }], probe: false });
   assert.equal((await signedFail.resolve("movie", "123", {})).status, "unverified");
   assert.equal(signedFail.probes, 1);
+});
+
+test("the downgrade advertisement is asked for again until it carries the authorization", async () => {
+  const f = fixture({
+    resources: [],
+    streamsSequence: [[notice], [notice], [authorizedNotice()]],
+    manifest: () => ({ xml: "<MPD/>", heights: [1080, 720, 480] }),
+  });
+  const result = await f.resolve("movie", "123", {});
+  // The same row is served with and without the authorization; only the one with it can play.
+  assert.equal(f.playInfoCalls, 3);
+  assert.equal(result.status, "ready");
+  assert.equal(result.source?.qualities[0]?.stream, "adapted");
+  assert.deepEqual(result.source?.qualities[0]?.heights, [1080, 720, 480]);
+  const token = result.source!.qualities[0]!.url.slice("/media/".length);
+  assert.equal(f.registry.resolve(token, "GET")?.kind, "manifest");
+  // The advertisement itself is never probed, and never becomes an option.
+  assert.equal(f.probes, 0);
+});
+
+test("an advertisement that never carries an authorization is reported, not retried forever", async () => {
+  const f = fixture({ resources: [], streamsSequence: [[notice]] });
+  assert.equal((await f.resolve("movie", "123", {})).status, "unsupported_format");
+  assert.equal(f.playInfoCalls, 4);
+  assert.deepEqual(f.manifestReads, []);
+});
+
+test("a listing that is not an advertisement is taken as it is", async () => {
+  // A row that already carries the authorization is usable on the first answer...
+  const authorized = fixture({ resources: [], streams: [authorizedNotice()], manifest: () => ({ xml: "<MPD/>", heights: [1080] }) });
+  assert.equal((await authorized.resolve("movie", "123", {})).status, "ready");
+  assert.equal(authorized.playInfoCalls, 1);
+  // ...and so is an ordinary progressive file, which needs no authorization at all.
+  const plain = fixture({ resources: [], streams: [progressive] });
+  assert.equal((await plain.resolve("movie", "123", {})).status, "ready");
+  assert.equal(plain.playInfoCalls, 1);
+});
+
+test("a refusal the advertisement caused is asked for again, because retrying is its remedy", async () => {
+  const f = fixture({
+    resources: [],
+    streamsSequence: [[notice], [notice], [notice], [notice], [authorizedNotice()]],
+    manifest: () => ({ xml: "<MPD/>", heights: [1080, 720, 480] }),
+  });
+  // Every attempt answered with the advertisement and no authorization: the refusal that follows is
+  // the one the viewer's own retry can reverse, because the same request carries the authorization
+  // at random. Remembering it would answer that retry with the identical refusal.
+  assert.equal((await f.resolve("movie", "123", {})).status, "unsupported_format");
+  assert.equal(f.playInfoCalls, 4);
+  assert.equal((await f.resolve("movie", "123", {})).status, "ready");
+  assert.equal(f.playInfoCalls, 5);
+});
+
+test("the advertisement attempt count is bounded and configurable", async () => {
+  for (const playInfoAttempts of [0, 9, 1.5]) {
+    assert.throws(() => fixture({ playInfoAttempts }), /Invalid moviebox resolver configuration/);
+  }
+  const once = fixture({ resources: [], streamsSequence: [[notice]], playInfoAttempts: 1 });
+  assert.equal((await once.resolve("movie", "123", {})).status, "unsupported_format");
+  assert.equal(once.playInfoCalls, 1);
 });
 
 test("unknown container evidence, codec or resolution never creates fake options", async () => {
@@ -181,7 +263,8 @@ test("resource HTTP 400 stops pagination and independently verified play-info is
   assert.equal(result.source?.qualities[0]?.label, "720p");
   assert.equal(f.registry.resolve(result.source!.qualities[0]!.url.slice("/media/".length), "GET")?.kind, "video");
   assert.deepEqual(f.paths.filter((path) => path.includes("/resource?")), [
-    `/wefeed-mobile-bff/subject-api/resource?subjectId=${subject.subjectId}&page=1&perPage=30`,
+    // The listing API rejects a page larger than the reference client's twenty rows.
+    `/wefeed-mobile-bff/subject-api/resource?subjectId=${subject.subjectId}&page=1&perPage=20`,
   ]);
   assert.deepEqual(f.paths.filter((path) => path.includes("/play-info/v2?")), [
     `/wefeed-mobile-bff/subject-api/play-info/v2?subjectId=${subject.subjectId}`,
@@ -256,10 +339,11 @@ test("only actual MovieBoxError http 400 allows fallback; authorization, rate li
   }
 });
 
-test("TV resource-400 fallback requires explicit requested episode evidence, never maxEp or requested query alone", async () => {
-  for (const streams of [[], [progressive], [{ ...progressive, se: 1, ep: 2 }], [{ ...progressive, se: 2, ep: 10 }]]) {
+test("TV resource-400 fallback proves the episode from the season, never from the request or a returned stream", async () => {
+  // An explicit list is authoritative: play-info answering for an omitted episode is not proof.
+  for (const streams of [[], [progressive], [{ ...progressive, se: 1, ep: 2 }]]) {
     const events: MovieBoxDiagnostic[] = [];
-    const f = fixture({ tv: true, detailRow: { ...subject, subjectType: 2, seasons: [{ se: 1, maxEp: 99 }] },
+    const f = fixture({ tv: true, detailRow: { ...subject, subjectType: 2, seasons: [{ se: 1, maxEp: 99, episodeNumbers: [2, 4] }] },
       resourcesError: new MovieBoxError("http", 400), streams, diagnostic: (event) => { events.push(event); } });
     assert.deepEqual(await f.resolve("tv", "123", { season: 1, episode: 10 }), { status: "unverified" });
     assert.deepEqual(events, [{ status: "unverified", stage: "episode", code: "episode_evidence_missing" }]);
@@ -267,6 +351,15 @@ test("TV resource-400 fallback requires explicit requested episode evidence, nev
       `/wefeed-mobile-bff/subject-api/play-info/v2?subjectId=${subject.subjectId}&se=1&ep=10`,
     ]);
     assert.equal(f.probes, 0);
+  }
+  // A bound-only season is proven up to maxEp and no further; the returned stream is still required.
+  for (const [maxEp, status, probes] of [[99, "ready", 1], [9, "unverified", 0]] as const) {
+    const events: MovieBoxDiagnostic[] = [];
+    const f = fixture({ tv: true, detailRow: { ...subject, subjectType: 2, seasons: [{ se: 1, maxEp }] },
+      resourcesError: new MovieBoxError("http", 400), streams: [progressive], diagnostic: (event) => { events.push(event); } });
+    assert.equal((await f.resolve("tv", "123", { season: 1, episode: 10 })).status, status);
+    assert.deepEqual(events, status === "ready" ? [] : [{ status: "unverified", stage: "episode", code: "episode_evidence_missing" }]);
+    assert.equal(f.probes, probes);
   }
 });
 
@@ -411,7 +504,6 @@ test("failed discovery emits one fixed gate reason without changing status or by
     { options: { searchRows: [{ ...subject, year: undefined }] }, status: "unverified", stage: "matching", code: "identity_incomplete" },
     { options: { searchRows: [subject, { ...subject, year: 2021 }] }, status: "unverified", stage: "matching", code: "identity_conflict" },
     { options: { searchRows: [] }, status: "not_found", stage: "matching", code: "not_found" },
-    { options: { searchRows: [subject, { ...subject, subjectId: "2" }] }, status: "ambiguous", stage: "matching", code: "ambiguous" },
     { options: { detailRow: {} }, status: "unverified", stage: "detail", code: "detail_missing" },
     { options: { detailRow: { ...subject, year: 2021 } }, status: "unverified", stage: "detail", code: "detail_mismatch" },
     { options: { tv: true, episodes: [], resources: [{ ...progressive, se: 1, ep: 2 }] }, status: "unverified", stage: "episode", code: "episode_evidence_missing" },
@@ -436,6 +528,17 @@ test("failed discovery emits one fixed gate reason without changing status or by
       assert.equal(JSON.stringify(events).includes(privateValue), false);
     }
   }
+});
+
+test("duplicate uploads are verified in turn so a dead duplicate never blocks playback", async () => {
+  // MovieBox lists the same film more than once under an identical title, type and year.
+  // The leading duplicate here yields no playable media, so the next one must be tried.
+  const duplicate = { ...subject, subjectId: "9000000000000000002", dubs: [] };
+  const f = fixture({ searchRows: [subject, duplicate], alternate: duplicate,
+    resources: [], alternateResources: [progressive] });
+  const result = await f.resolve("movie", "123", {});
+  assert.equal(result.status, "ready");
+  assert.equal(result.source?.qualities.length, 1);
 });
 
 test("probe reason beats skipped metadata and adaptive classification keeps existing precedence", async () => {

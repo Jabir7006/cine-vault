@@ -1,6 +1,11 @@
 import { Hono } from "hono";
 import { PlaybackError } from "../moviebox/playback-sessions";
+import { NativePlayerError } from "../media/native";
+import { PlayerError } from "../media/player";
 import type { CommitInput, PlaybackSessions, PrepareInput } from "../moviebox/playback-sessions";
+import type { NativePlayer } from "../media/native";
+import type { PlayerLeases } from "../media/player";
+import type { Transcoder } from "../media/transcode";
 
 const invalid = () => new PlaybackError("invalid_request", 400);
 const opaque = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(value);
@@ -50,7 +55,10 @@ export function parseCommit(input: Record<string, unknown>): CommitInput {
       input.version !== 1 || !revision(input.baseRevision) || !opaque(input.preparationId)) throw invalid();
   return input as unknown as CommitInput;
 }
-export function createPlaybackRoute(service?: PlaybackSessions) {
+export function createPlaybackRoute(
+  service?: PlaybackSessions,
+  player?: { leases: PlayerLeases; transcoder: Transcoder; native: NativePlayer },
+) {
   const route = new Hono();
   route.use("*", async (c, next) => {
     c.header("Cache-Control", "no-store"); c.header("Referrer-Policy", "no-referrer");
@@ -58,6 +66,8 @@ export function createPlaybackRoute(service?: PlaybackSessions) {
   });
   route.onError((error, c) => {
     c.header("Cache-Control", "no-store"); c.header("Referrer-Policy", "no-referrer");
+    if (error instanceof NativePlayerError) return c.json({ version: 1, kind: "error", code: error.code }, error.status);
+    if (error instanceof PlayerError) return c.json({ version: 1, kind: "error", code: error.code }, error.status);
     const safe = error instanceof PlaybackError ? error : new PlaybackError("unavailable", 503);
     return c.json({ version: 1, kind: "error", code: safe.code }, safe.status);
   });
@@ -85,6 +95,42 @@ export function createPlaybackRoute(service?: PlaybackSessions) {
     const input = parseCommit(await body(c.req.raw));
     if (c.req.raw.signal.aborted) throw new PlaybackError("unavailable", 503);
     return c.json(auth.service.commit(id, auth.token, input));
+  });
+  /**
+   * Open the long-lived lease this session's title plays through.
+   *
+   * A capability lasts minutes and a film does not, so neither the browser's transcode nor a native
+   * player can be pointed at one. The lease keeps the session's own verified binding, re-authorizes
+   * through it on a timer, and is reached by machines on this host only — the routes that serve it
+   * live under `/player/`, guarded by the peer address rather than by a token.
+   */
+  route.post("/:sessionId/player", async (c) => {
+    const id = c.req.param("sessionId");
+    const auth = requireService(id, c.req.header("x-playback-control"));
+    if (!player) throw new PlaybackError("unavailable", 503);
+    const lease = await player.leases.open(id, auth.service.player(id, auth.token), c.req.raw.signal);
+    const origin = new URL(c.req.url).origin;
+    return c.json({
+      version: 1, kind: "player", base: lease.base, expiresAt: lease.expiresAt,
+      ladder: [...player.leases.ladder(lease.id)],
+      // What this host can actually do, so the UI offers only the paths that exist here.
+      encoder: player.transcoder.ffmpeg !== undefined,
+      native: player.native.available === undefined ? null : player.native.available.split("/").pop() ?? null,
+      origin,
+    });
+  });
+  /** Hand the lease to a player on this machine, which reads the signed manifest as it is. */
+  route.post("/:sessionId/player/native", (c) => {
+    const id = c.req.param("sessionId");
+    const auth = requireService(id, c.req.header("x-playback-control"));
+    if (!player) throw new PlaybackError("unavailable", 503);
+    const lease = player.leases.find(id);
+    if (!lease) throw new PlaybackError("conflict", 409);
+    const title = c.req.query("title");
+    return c.json({
+      version: 1, kind: "launched",
+      player: player.native.launch(`${new URL(c.req.url).origin}${lease.base}index.mpd`, title).player,
+    });
   });
   return route;
 }

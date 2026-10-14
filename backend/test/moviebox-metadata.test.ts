@@ -64,6 +64,20 @@ test("season numbers remain explicit; maxEp never expands into fabricated episod
   for (const value of [null, "bad", { subject: [] }, { seasons: [{ se: 0 }] }, { seasons: [{ se: 1, episodeNumbers: [0] }] },
     { seasons: [{ se: 1, episodeNumbers: "1,2" }] }, { seasons: [{ se: 1, maxEp: 10001 }] }, { seasons: Array(501).fill({ se: 1 }) }]) assert.throws(() => parseSeasonInfo(value), malformed);
 });
+test("the allEp string form supplies the same explicit episode list as episodeNumbers", () => {
+  // Live season-info omits episodeNumbers and sends "allEp" as a comma-separated string; a season
+  // with a gap lists exactly what exists, which is narrower than its maxEp bound.
+  assert.deepEqual(parseSeasonInfo({ seasons: [{ se: 1, maxEp: 7, allEp: "1,2,4,5,6,7" }, { se: 2, maxEp: 13, allEp: "" }] }),
+    [{ se: 1, episodeNumbers: [1, 2, 4, 5, 6, 7], maxEp: 7 }, { se: 2, episodeNumbers: [], maxEp: 13 }]);
+  // The structured field wins when both are present; a malformed string simply carries no list.
+  assert.deepEqual(parseSeasonInfo({ seasons: [{ se: 3, episodeNumbers: [4], allEp: "9" }] })[0]!.episodeNumbers, [4]);
+  for (const allEp of ["x", "1,x", "0", "10001", "1,".repeat(10001)]) {
+    assert.deepEqual(parseSeasonInfo({ seasons: [{ se: 1, allEp }] })[0]!.episodeNumbers, []);
+  }
+  // Stray separators are tolerated rather than discarding the whole list.
+  assert.deepEqual(parseSeasonInfo({ seasons: [{ se: 1, allEp: "1,,2," }] })[0]!.episodeNumbers, [1, 2]);
+  assert.deepEqual(parseSeasonInfo({ seasons: [{ se: 1, allEp: " 2 , 2 ,10 " }] })[0]!.episodeNumbers, [2, 10]);
+});
 test("play info retains actual bounded metadata only and never invents url or qualities", () => {
   const streams = parsePlayInfo({ streams: [{ id: "11", format: "MP4", codecName: "h264", resolutions: [480, "720"], size: 1000,
     signCookie: "opaque-not-a-destination" }] });
@@ -149,6 +163,26 @@ test("notice/deprecation paths are rejected; extension/MP4 labels alone are neve
   assert.deepEqual(classifyStream({ format: "MP4", requiresVerification: false }), { status: "unsupported_format", reason: "missing_url" });
   assert.deepEqual(classifyStream({ url: "http://example.test/x.mp4", requiresVerification: false }), { status: "unsupported_format", reason: "invalid_url" });
   assert.deepEqual(classifyStream({ url: cdn, format: "MKV", requiresVerification: false }), { status: "unsupported_format", reason: "format" });
+});
+test("the API's catch-all bucket advertisement is never a candidate for the requested title", () => {
+  // The notice describes the title's real size and duration, so only its location identifies it.
+  for (const url of ["https://macdn.aoneroom.com/other/2026/10/10/80da52722ee7de7a4303290af6783424.mp4",
+    "https://macdn.aoneroom.com/other/2026/10/10/80da52722ee7de7a4303290af6783424.mkv"]) {
+    assert.deepEqual(classifyStream({ url, format: "MP4", signCookie: "opaque", requiresVerification: true }),
+      { status: "unsupported_format", reason: "notice" });
+  }
+  // Any other bucket, host or media type keeps its normal classification.
+  for (const url of ["https://macdn.aoneroom.com/media/x.mp4", "https://sacdn.hakunaymatata.com/other/x.mp4",
+    "https://macdn.aoneroom.com/other/x.jpg", "https://media.example.test/opaque"]) {
+    assert.notEqual(classifyStream({ url, format: "MP4", requiresVerification: true }).reason, "notice");
+  }
+});
+test("a film's zero season/episode pair is preserved while a half-zero pair is not", () => {
+  const film = parsePlayInfo({ list: [{ resourceId: "12", resourceLink: cdn, se: 0, ep: 0, resolution: 1080 }] })[0]!;
+  assert.equal(film.se, 0);
+  assert.equal(film.ep, 0);
+  assert.equal(film.height, 1080);
+  assert.deepEqual(parsePlayInfo({ list: [{ url: cdn, se: 0, ep: 1 }, { url: cdn, se: 1, ep: 0 }, { url: cdn, se: -1, ep: 0 }] }), []);
 });
 test("unknown values and numeric media metadata stay bounded without unsafe coercion", () => {
   const parsed = parsePlayInfo({ streams: [{ url: cdn, height: 9000, size: 2 ** 53, quality: "x".repeat(65), codec: "x".repeat(129) }] })[0]!;

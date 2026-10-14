@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 
 import { mediaDetailsOptions } from "@/features/details/queries";
-import { getMediaTitle, getMediaYear, type MediaType } from "@/features/details/types";
+import { getMediaRuntime, getMediaTitle, getMediaYear, type MediaType } from "@/features/details/types";
 import { WatchPlayer } from "./WatchPlayer";
 import { EpisodeBrowser } from "./EpisodeBrowser";
 
@@ -19,6 +19,9 @@ export const WatchPage = ({ mediaType, mediaId, season, episode, onChangeEpisode
   const { data: details } = useSuspenseQuery(mediaDetailsOptions(mediaType, mediaId));
   const title = getMediaTitle(details);
   const year = getMediaYear(details);
+  // A streamed title reports no length of its own, so the published runtime is what a position is
+  // measured against. For a series this is the published per-episode length, which is an average.
+  const runtimeMinutes = getMediaRuntime(details);
 
   return (
     <div className="mx-auto min-h-[70dvh] max-w-5xl px-4 pb-[calc(7rem+env(safe-area-inset-bottom))] pt-20 sm:px-8 sm:pt-24">
@@ -46,6 +49,7 @@ export const WatchPage = ({ mediaType, mediaId, season, episode, onChangeEpisode
         season={season}
         episode={episode}
         title={title}
+        durationSeconds={runtimeMinutes ? runtimeMinutes * 60 : undefined}
         episodeControls={mediaType === "tv" ? (
           <EpisodeBrowser
             mediaId={mediaId}

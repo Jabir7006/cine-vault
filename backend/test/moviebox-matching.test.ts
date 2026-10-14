@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasEpisodeEvidence, identityMatches, matchMovieBoxSubject, normalizeTitle, selectUniqueCandidate } from "../src/moviebox/matching.js";
+import { hasEpisodeEvidence, identityMatches, matchMovieBoxSubject, normalizeTitle, selectCandidates } from "../src/moviebox/matching.js";
 import type { MatchingMetadata, Target } from "../src/moviebox/matching.js";
 import type { SubjectDetail, SubjectIdentity } from "../src/moviebox/metadata.js";
 import { cleanMovieBoxTitle } from "../src/moviebox/metadata.js";
@@ -40,28 +40,24 @@ test("cleanMovieBoxTitle strips release tags, resolutions, language suffixes and
   assert.equal(cleanMovieBoxTitle(""), "");
   assert.equal(cleanMovieBoxTitle("   "), "");
 });
-test("search candidates with release tags match cleaned titles via selectUniqueCandidate", () => {
-  // MovieBox API returns raw titles like "[Dub] Film 2"; matchesTargetTitle (loose) cleans
-  // for initial filtering, but identityMatches (strict) requires exact title match — only
-  // the canonical "Film 2" subject enters the exact map, disambiguating from dubs/remakes.
+test("decorated row titles match through the same cleaning used for confirmation", () => {
+  // MovieBox decorates rows with release tags, language markers and season suffixes.
+  // Search filtering and identity confirmation now share one cleaning rule, so a
+  // decorated row is a usable candidate instead of being discarded as a mismatch.
   const rawDub: SubjectIdentity = { subjectId: "2", title: "[Dub] Film 2", type: "movie", year: 2024 };
-  // Raw dub-only title fails strict identity but passes loose title matching.
-  assert.equal(selectUniqueCandidate([rawDub], target).status, "not_found");
-  // Canonical title passes both loose and strict → candidate.
-  assert.equal(selectUniqueCandidate([candidate, rawDub], target).status, "candidate");
-  // Two canonical titles, different IDs → ambiguous.
-  const canonical2: SubjectIdentity = { subjectId: "2", title: "Film 2", type: "movie", year: 2024 };
-  assert.equal(selectUniqueCandidate([candidate, canonical2], target).status, "ambiguous");
-  assert.equal(selectUniqueCandidate([{ ...canonical2, year: 2023 }], target).status, "not_found");
+  assert.deepEqual(selectCandidates([rawDub], target), { status: "candidates", subjects: [rawDub] });
+  // An undecorated title outranks its decorated duplicate; both stay usable.
+  assert.deepEqual(selectCandidates([rawDub, candidate], target), { status: "candidates", subjects: [candidate, rawDub] });
+  assert.deepEqual(selectCandidates([{ ...rawDub, year: 2023 }], target), { status: "not_found" });
 });
 test("exact year matches are preferred over year-unknown candidates", () => {
   // Candidates with year mismatch never pass identityMatches (year is part of strict identity).
   const wrongYear: SubjectIdentity = { subjectId: "2", title: "Film 2", type: "movie", year: 2023 };
-  assert.equal(selectUniqueCandidate([wrongYear, { ...wrongYear, subjectId: "3" }], target).status, "not_found");
-  // Exact year match wins: candidate selected even when a year-undefined candidate is present.
-  assert.equal(selectUniqueCandidate([candidate, { ...candidate, subjectId: "2" }], target).status, "ambiguous");
-  // With one exact year match, a different title with wrong year doesn't cause ambiguity.
-  assert.equal(selectUniqueCandidate([candidate, wrongYear], target).status, "candidate");
+  assert.deepEqual(selectCandidates([wrongYear, { ...wrongYear, subjectId: "3" }], target), { status: "not_found" });
+  // Duplicate exact matches are all returned, ordered so verification is deterministic.
+  assert.deepEqual(selectCandidates([candidate, { ...candidate, subjectId: "2" }], target),
+    { status: "candidates", subjects: [{ ...candidate, subjectId: "2" }, candidate] });
+  assert.deepEqual(selectCandidates([candidate, wrongYear], target), { status: "candidates", subjects: [candidate] });
 });
 test("canonical or original exact title, type and year all must agree", () => {
   assert.equal(identityMatches({ ...candidate, title: "  Ｆilm ２ " }, target), true);
@@ -70,23 +66,30 @@ test("canonical or original exact title, type and year all must agree", () => {
     { ...candidate, type: "tv" as const }, { ...candidate, year: 2023 }, { ...candidate, title: undefined },
     { ...candidate, year: undefined }, { ...candidate, type: undefined }, { ...candidate, subjectId: "0" }]) assert.equal(identityMatches(row, target), false);
 });
-test("unique selection deduplicates consistent IDs but rejects remakes and ambiguity", () => {
-  assert.equal(selectUniqueCandidate([candidate, candidate, { ...candidate, subjectId: "2", year: 2023 }], target).status, "candidate");
-  assert.deepEqual(selectUniqueCandidate([candidate, { ...candidate, subjectId: "2" }], target), { status: "ambiguous" });
-  assert.deepEqual(selectUniqueCandidate([{ ...candidate, year: 2023 }], target), { status: "not_found" });
-  assert.deepEqual(selectUniqueCandidate([], target), { status: "not_found" });
+test("selection deduplicates consistent IDs and bounds duplicate fan-out", () => {
+  assert.deepEqual(selectCandidates([candidate, candidate, { ...candidate, subjectId: "2", year: 2023 }], target),
+    { status: "candidates", subjects: [candidate] });
+  const tie = selectCandidates([candidate, { ...candidate, subjectId: "2" }], target);
+  assert.equal(tie.status, "candidates");
+  if (tie.status === "candidates") assert.deepEqual(tie.subjects.map((row) => row.subjectId), ["2", candidate.subjectId]);
+  // A duplicate flood is truncated so detail fan-out can never grow with result size.
+  const flood = selectCandidates(Array.from({ length: 9 }, (_, index) => ({ ...candidate, subjectId: String(index + 1) })), target);
+  assert.equal(flood.status, "candidates");
+  if (flood.status === "candidates") assert.equal(flood.subjects.length, 3);
+  assert.deepEqual(selectCandidates([{ ...candidate, year: 2023 }], target), { status: "not_found" });
+  assert.deepEqual(selectCandidates([], target), { status: "not_found" });
 });
 test("missing identity evidence never supplies a candidate or silently hides plausible alternatives", () => {
   for (const row of [{ ...candidate, year: undefined }, { ...candidate, type: undefined }, { ...candidate, subjectId: "0" }]) {
-    assert.deepEqual(selectUniqueCandidate([row], target), { status: "unverified" });
-    assert.deepEqual(selectUniqueCandidate([candidate, row], target), { status: "unverified" });
+    assert.deepEqual(selectCandidates([row], target), { status: "unverified" });
+    assert.deepEqual(selectCandidates([candidate, row], target), { status: "unverified" });
   }
-  assert.deepEqual(selectUniqueCandidate([{ ...candidate, title: undefined }], target), { status: "not_found" });
-  assert.deepEqual(selectUniqueCandidate([candidate, { ...candidate, year: 2020 }], target), { status: "unverified" });
+  assert.deepEqual(selectCandidates([{ ...candidate, title: undefined }], target), { status: "not_found" });
+  assert.deepEqual(selectCandidates([candidate, { ...candidate, year: 2020 }], target), { status: "unverified" });
 });
 test("matching searches distinct canonical/original titles and reconfirms the exact string ID", async () => {
   const { metadata, searches, details } = fixture([candidate]);
-  assert.deepEqual(await matchMovieBoxSubject(metadata, target), { status: "matched", subject: detail });
+  assert.deepEqual(await matchMovieBoxSubject(metadata, target), { status: "matched", subject: detail, alternates: [] });
   assert.deepEqual(searches, target.titles);
   assert.deepEqual(details, [candidate.subjectId]);
 });
@@ -95,13 +98,20 @@ test("normalized duplicate queries issue one search, first page only", async () 
   assert.equal((await matchMovieBoxSubject(metadata, { ...target, titles: ["Film 2", " ＦILM ２ "] })).status, "matched");
   assert.deepEqual(searches, ["Film 2"]);
 });
-test("ambiguity across title queries blocks detail fan-out", async () => {
+test("duplicate subjects are reconfirmed by detail with bounded fan-out", async () => {
+  // Two title queries each yield a distinct duplicate ID; both are reconfirmed by detail.
   let searched = 0;
-  let detailed = 0;
+  const detailed: string[] = [];
   const result = await matchMovieBoxSubject({ search: async () => [{ ...candidate, subjectId: String(++searched) }],
-    detail: async () => { detailed++; return detail; } }, target);
-  assert.deepEqual(result, { status: "ambiguous" });
-  assert.equal(detailed, 0);
+    detail: async (id) => { detailed.push(id); return { ...detail, subjectId: id }; } }, target);
+  assert.equal(result.status, "matched");
+  assert.deepEqual(detailed, ["1", "2"]);
+  // A flood of agreeing duplicates is truncated: detail fan-out never scales with results.
+  const flood: string[] = [];
+  const many = await matchMovieBoxSubject({ search: async () => Array.from({ length: 9 }, (_, index) => ({ ...candidate, subjectId: String(index + 1) })),
+    detail: async (id) => { flood.push(id); return { ...detail, subjectId: id }; } }, target);
+  assert.equal(many.status, "matched");
+  assert.equal(flood.length, 3);
 });
 test("no matching candidate does not request any detail", async () => {
   const { metadata, details } = fixture([{ ...candidate, title: "Film 3" }]);
@@ -146,6 +156,19 @@ test("matching failure callbacks preserve exact fixed stage and cannot alter pro
   assert.equal(f.details.length, 0);
 });
 
+test("season rows sharing one series ID are not a contradictory identity", () => {
+  const series: Target = { type: "tv", titles: ["Synthetic Series"], year: 2008 };
+  const rows: SubjectIdentity[] = [
+    { subjectId: "7", title: "Synthetic Series S1", type: "tv", year: 2008 },
+    { subjectId: "7", title: "Synthetic Series S2", type: "tv", year: 2009 },
+    { subjectId: "7", title: "Synthetic Series S5", type: "tv", year: 2012 },
+  ];
+  // The season rows clean to the series title; only the first-air year row matches, and
+  // the differing years must not be read as one ID contradicting itself.
+  assert.deepEqual(selectCandidates(rows, series), { status: "candidates", subjects: [rows[0]] });
+  // A film carries exactly one release year, so a second year for the same ID still fails.
+  assert.deepEqual(selectCandidates([candidate, { ...candidate, year: 2020 }], target), { status: "unverified" });
+});
 test("TV identity is not a movie match, and exact episode proof is a separate gate", async () => {
   const tv: SubjectDetail = { ...detail, type: "tv", seasons: [{ se: 2, episodeNumbers: [3, 9], maxEp: 20 }] };
   const tvTarget: Target = { ...target, type: "tv" };
@@ -155,13 +178,23 @@ test("TV identity is not a movie match, and exact episode proof is a separate ga
   assert.equal(hasEpisodeEvidence({ season: 2, episode: 8 }, tv.seasons), false);
   assert.equal(hasEpisodeEvidence({ season: 1, episode: 9 }, tv.seasons), false);
 });
-test("maxEp alone/array positions/other resource episodes are never proof", () => {
-  const seasons = [{ se: 1, episodeNumbers: [], maxEp: 15 }];
-  assert.equal(hasEpisodeEvidence({ season: 1, episode: 1 }, seasons), false);
-  assert.equal(hasEpisodeEvidence({ season: 1, episode: 13 }, seasons, [{ se: 1, ep: 13 }]), true);
-  assert.equal(hasEpisodeEvidence({ season: 1, episode: 13 }, seasons, [{ se: 2, ep: 13 }, { se: 1, ep: 12 }, {}]), false);
-  assert.equal(hasEpisodeEvidence({ season: 0, episode: 1 }, seasons), false);
-  assert.equal(hasEpisodeEvidence({ season: 1, episode: 10001 }, seasons), false);
+test("an explicit episode list is authoritative and maxEp is never stretched past itself", () => {
+  // MovieBox reports most seasons with only a highest-episode bound, so 1..maxEp is the season.
+  const bounded = [{ se: 1, episodeNumbers: [], maxEp: 15 }];
+  assert.equal(hasEpisodeEvidence({ season: 1, episode: 1 }, bounded), true);
+  assert.equal(hasEpisodeEvidence({ season: 1, episode: 15 }, bounded), true);
+  assert.equal(hasEpisodeEvidence({ season: 1, episode: 16 }, bounded), false);
+  assert.equal(hasEpisodeEvidence({ season: 2, episode: 1 }, bounded), false);
+  // A season that lists its episodes never gains the ones it omits.
+  const gapped = [{ se: 1, episodeNumbers: [1, 2, 4, 5, 6, 7], maxEp: 7 }];
+  assert.equal(hasEpisodeEvidence({ season: 1, episode: 4 }, gapped), true);
+  assert.equal(hasEpisodeEvidence({ season: 1, episode: 3 }, gapped), false);
+  // No bound and no list is no evidence; array positions and other episodes' resources never prove.
+  assert.equal(hasEpisodeEvidence({ season: 1, episode: 1 }, [{ se: 1, episodeNumbers: [] }]), false);
+  assert.equal(hasEpisodeEvidence({ season: 1, episode: 13 }, [{ se: 1, episodeNumbers: [], maxEp: 12 }], [{ se: 1, ep: 13 }]), true);
+  assert.equal(hasEpisodeEvidence({ season: 1, episode: 13 }, [{ se: 1, episodeNumbers: [], maxEp: 12 }], [{ se: 2, ep: 13 }, { se: 1, ep: 12 }, {}]), false);
+  assert.equal(hasEpisodeEvidence({ season: 0, episode: 1 }, bounded), false);
+  assert.equal(hasEpisodeEvidence({ season: 1, episode: 10001 }, bounded), false);
 });
 test("explicit dubs remain metadata, not manufactured ready audio choices", async () => {
   const withDubs: SubjectDetail = { ...detail, dubs: [{ subjectId: "8", title: "Unverified alternate", lang: "bn" }] };

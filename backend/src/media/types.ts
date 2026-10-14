@@ -35,7 +35,7 @@ export interface MediaProbeEvidence {
 
 export interface MediaResource {
   url: string;
-  kind: "video" | "subtitle";
+  kind: "video" | "subtitle" | "manifest";
   headers: Readonly<Record<string, string>>;
   expiresAt?: number;
   height?: number;
@@ -45,6 +45,15 @@ export interface MediaResource {
   label?: string;
   captionFormat?: "srt" | "vtt";
   representation?: MediaRepresentation;
+  /** Adaptive manifest ladder, in the manifest's own order. Only meaningful for a manifest. */
+  heights?: readonly number[];
+}
+
+/** A signed adaptive manifest, read once and served to a player through the relay. */
+export interface DashManifest {
+  xml: string;
+  heights: number[];
+  audioRepresentationId?: string;
 }
 
 export interface MediaTransport {
@@ -52,6 +61,10 @@ export interface MediaTransport {
   probeEvidence?(resource: MediaResource, signal?: AbortSignal): Promise<MediaProbeEvidence>;
   caption(resource: MediaResource, signal?: AbortSignal): Promise<string>;
   relay(resource: MediaResource, method: "GET" | "HEAD", range?: string, signal?: AbortSignal): Promise<Response>;
+  /** Adaptive playback: read a manifest, serve it rewritten, and relay its segments. */
+  readManifest?(resource: MediaResource, signal?: AbortSignal): Promise<DashManifest>;
+  relayManifest?(resource: MediaResource, publicBase: string, method: "GET" | "HEAD", signal?: AbortSignal): Promise<Response>;
+  relaySegment?(resource: MediaResource, name: string, range: string | undefined, signal?: AbortSignal): Promise<Response>;
 }
 
 export interface MediaRegistry {

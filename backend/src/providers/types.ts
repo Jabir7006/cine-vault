@@ -12,6 +12,14 @@ export interface DirectQuality {
   label: string;
   url: string;
   height?: number;
+  /**
+   * `adapted` marks a signed adaptive manifest rather than a progressive file. It is still one
+   * descriptor and one URL; only a player that can read a manifest may use it, which is why the
+   * relay also offers a transcoded progressive stream for this quality.
+   */
+  stream?: "adapted";
+  /** The ladder a manifest advertises, in its own order. */
+  heights?: number[];
 }
 
 export interface DirectAudio {
